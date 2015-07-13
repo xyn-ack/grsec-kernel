@@ -1,0 +1,11 @@
+--- drivers/scsi/sr.c
++++ drivers/scsi/sr.c
+@@ -79,7 +79,7 @@
+ static DEFINE_MUTEX(sr_mutex);
+ static int sr_probe(struct device *);
+ static int sr_remove(struct device *);
+-static int sr_done(struct scsi_cmnd *);
++static unsigned int sr_done(struct scsi_cmnd *);
+ static int sr_runtime_suspend(struct device *dev);
+ 
+ static struct dev_pm_ops sr_pm_ops = {

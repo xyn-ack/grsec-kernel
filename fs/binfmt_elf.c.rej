@@ -1,0 +1,12 @@
+--- fs/binfmt_elf.c
++++ fs/binfmt_elf.c
+@@ -1267,8 +1267,7 @@
+ 			}
+ #endif
+ 
+-			total_size = total_mapping_size(elf_phdata,
+-							loc->elf_ex.e_phnum);
++			total_size = total_mapping_size(elf_phdata, loc->elf_ex.e_phnum);
+ 			if (!total_size) {
+ 				retval = -EINVAL;
+ 				goto out_free_dentry;
