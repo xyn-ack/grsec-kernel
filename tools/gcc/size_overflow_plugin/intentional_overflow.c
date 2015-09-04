@@ -456,13 +456,15 @@ bool is_a_cast_and_const_overflow(const_tree no_const_rhs)
 {
 	const_tree rhs1, lhs, rhs1_type, lhs_type;
 	enum machine_mode lhs_mode, rhs_mode;
+	const gassign *assign;
 	gimple def_stmt = get_def_stmt(no_const_rhs);
 
 	if (!def_stmt || !gimple_assign_cast_p(def_stmt))
 		return false;
 
-	rhs1 = gimple_assign_rhs1(def_stmt);
-	lhs = gimple_assign_lhs(def_stmt);
+	assign = as_a_const_gassign(def_stmt);
+	rhs1 = gimple_assign_rhs1(assign);
+	lhs = gimple_assign_lhs(assign);
 	rhs1_type = TREE_TYPE(rhs1);
 	lhs_type = TREE_TYPE(lhs);
 	rhs_mode = TYPE_MODE(rhs1_type);
@@ -486,7 +488,7 @@ static unsigned int uses_num(tree node)
 			return num;
 		if (is_gimple_debug(use_stmt))
 			continue;
-		if (gimple_assign_cast_p(use_stmt) && is_size_overflow_type(gimple_assign_lhs(use_stmt)))
+		if (gimple_assign_cast_p(use_stmt) && is_size_overflow_type(gimple_assign_lhs(as_a_const_gassign(use_stmt))))
 			continue;
 		num++;
 	}
@@ -502,12 +504,14 @@ static bool no_uses(tree node)
 bool is_const_plus_unsigned_signed_truncation(const_tree lhs)
 {
 	tree rhs1, lhs_type, rhs_type, rhs2, not_const_rhs;
+	gassign *assign;
 	gimple def_stmt = get_def_stmt(lhs);
 
 	if (!def_stmt || !gimple_assign_cast_p(def_stmt))
 		return false;
 
-	rhs1 = gimple_assign_rhs1(def_stmt);
+	assign = as_a_gassign(def_stmt);
+	rhs1 = gimple_assign_rhs1(assign);
 	rhs_type = TREE_TYPE(rhs1);
 	lhs_type = TREE_TYPE(lhs);
 	if (TYPE_UNSIGNED(lhs_type) || !TYPE_UNSIGNED(rhs_type))
@@ -519,11 +523,12 @@ bool is_const_plus_unsigned_signed_truncation(const_tree lhs)
 	if (!def_stmt || !is_gimple_assign(def_stmt) || gimple_num_ops(def_stmt) != 3)
 		return false;
 
-	if (gimple_assign_rhs_code(def_stmt) != PLUS_EXPR)
+	assign = as_a_gassign(def_stmt);
+	if (gimple_assign_rhs_code(assign) != PLUS_EXPR)
 		return false;
 
-	rhs1 = gimple_assign_rhs1(def_stmt);
-	rhs2 = gimple_assign_rhs2(def_stmt);
+	rhs1 = gimple_assign_rhs1(assign);
+	rhs2 = gimple_assign_rhs2(assign);
 	if (!is_gimple_constant(rhs1) && !is_gimple_constant(rhs2))
 		return false;
 
@@ -652,15 +657,18 @@ static bool is_subtraction_special(struct visited *visited, const gassign *stmt)
 	if (gimple_assign_rhs_code(stmt) != MINUS_EXPR)
 		return false;
 
-	rhs1_def_stmt = get_def_stmt(rhs1);
-	rhs2_def_stmt = get_def_stmt(rhs2);
-	if (!gimple_assign_cast_p(rhs1_def_stmt) || !gimple_assign_cast_p(rhs2_def_stmt))
+	def_stmt_1 = get_def_stmt(rhs1);
+	def_stmt_2 = get_def_stmt(rhs2);
+	if (!gimple_assign_cast_p(def_stmt_1) || !gimple_assign_cast_p(def_stmt_2))
 		return false;
 
+	rhs1_def_stmt = as_a_const_gassign(def_stmt_1);
+	rhs2_def_stmt = as_a_const_gassign(def_stmt_2);
 	rhs1_def_stmt_rhs1 = gimple_assign_rhs1(rhs1_def_stmt);
 	rhs2_def_stmt_rhs1 = gimple_assign_rhs1(rhs2_def_stmt);
 	rhs1_def_stmt_lhs = gimple_assign_lhs(rhs1_def_stmt);
 	rhs2_def_stmt_lhs = gimple_assign_lhs(rhs2_def_stmt);
+
 	rhs1_def_stmt_rhs1_mode = TYPE_MODE(TREE_TYPE(rhs1_def_stmt_rhs1));
 	rhs2_def_stmt_rhs1_mode = TYPE_MODE(TREE_TYPE(rhs2_def_stmt_rhs1));
 	rhs1_def_stmt_lhs_mode = TYPE_MODE(TREE_TYPE(rhs1_def_stmt_lhs));
@@ -715,14 +723,13 @@ static tree get_def_stmt_rhs(struct visited *visited, const_tree var)
 	def_stmt = get_def_stmt(var);
 	if (!gimple_assign_cast_p(def_stmt))
 		return NULL_TREE;
-	gcc_assert(gimple_code(def_stmt) != GIMPLE_NOP && pointer_set_contains(visited->my_stmts, def_stmt) && gimple_assign_cast_p(def_stmt));
 
-	rhs1 = gimple_assign_rhs1(def_stmt);
+	rhs1 = gimple_assign_rhs1(as_a_const_gassign(def_stmt));
 	rhs1_def_stmt = get_def_stmt(rhs1);
 	if (!gimple_assign_cast_p(rhs1_def_stmt))
 		return rhs1;
 
-	def_stmt_rhs1 = gimple_assign_rhs1(rhs1_def_stmt);
+	def_stmt_rhs1 = gimple_assign_rhs1(as_a_const_gassign(rhs1_def_stmt));
 	def_stmt_rhs1_def_stmt = get_def_stmt(def_stmt_rhs1);
 
 	switch (gimple_code(def_stmt_rhs1_def_stmt)) {
@@ -753,8 +760,8 @@ tree handle_integer_truncation(struct visited *visited, const_tree lhs)
 	new_rhs1 = expand(visited, rhs1);
 	new_rhs2 = expand(visited, rhs2);
 
-	new_rhs1_def_stmt_rhs1 = get_def_stmt_rhs(visited, new_rhs1);
-	new_rhs2_def_stmt_rhs1 = get_def_stmt_rhs(visited, new_rhs2);
+	new_rhs1_def_stmt_rhs1 = get_def_stmt_rhs(new_rhs1);
+	new_rhs2_def_stmt_rhs1 = get_def_stmt_rhs(new_rhs2);
 
 	if (new_rhs1_def_stmt_rhs1 == NULL_TREE || new_rhs2_def_stmt_rhs1 == NULL_TREE)
 		return NULL_TREE;
@@ -797,6 +804,7 @@ static bool look_for_mult_and_add(const_gimple stmt)
 	const_tree res;
 	tree rhs1, rhs2, def_rhs1, def_rhs2, const_rhs, def_const_rhs;
 	const_gimple def_stmt;
+	const gassign *assign, *def_assign;
 
 	if (!stmt || gimple_code(stmt) == GIMPLE_NOP)
 		return false;
@@ -805,8 +813,9 @@ static bool look_for_mult_and_add(const_gimple stmt)
 	if (gimple_assign_rhs_code(stmt) != MULT_EXPR)
 		return false;
 
-	rhs1 = gimple_assign_rhs1(stmt);
-	rhs2 = gimple_assign_rhs2(stmt);
+	assign = as_a_const_gassign(stmt);
+	rhs1 = gimple_assign_rhs1(assign);
+	rhs2 = gimple_assign_rhs2(assign);
 	if (is_gimple_constant(rhs1)) {
 		const_rhs = rhs1;
 		def_stmt = get_def_stmt(rhs2);
@@ -822,8 +831,9 @@ static bool look_for_mult_and_add(const_gimple stmt)
 	if (gimple_assign_rhs_code(def_stmt) != PLUS_EXPR && gimple_assign_rhs_code(def_stmt) != MINUS_EXPR)
 		return false;
 
-	def_rhs1 = gimple_assign_rhs1(def_stmt);
-	def_rhs2 = gimple_assign_rhs2(def_stmt);
+	def_assign = as_a_const_gassign(def_stmt);
+	def_rhs1 = gimple_assign_rhs1(def_assign);
+	def_rhs2 = gimple_assign_rhs2(def_assign);
 	if (is_gimple_constant(def_rhs1))
 		def_const_rhs = def_rhs1;
 	else if (is_gimple_constant(def_rhs2))
@@ -942,17 +952,17 @@ void unsigned_signed_cast_intentional_overflow(struct visited *visited, gassign 
 	if (!is_gimple_assign(def_stmt))
 		return;
 
-	rhs1 = gimple_assign_rhs1(def_stmt);
+	rhs1 = gimple_assign_rhs1(as_a_const_gassign(def_stmt));
 	if (!is_unsigned_cast_or_call_def_stmt(rhs1))
 		return;
 
-	rhs2 = gimple_assign_rhs2(def_stmt);
+	rhs2 = gimple_assign_rhs2(as_a_const_gassign(def_stmt));
 	if (!is_unsigned_cast_or_call_def_stmt(rhs2))
 		return;
 	if (gimple_num_ops(def_stmt) == 3 && !is_gimple_constant(rhs1) && !is_gimple_constant(rhs2))
 		return;
 
-	so_stmt = get_dup_stmt(visited, stmt);
+	so_stmt = as_a_gassign(get_dup_stmt(visited, stmt));
 	create_up_and_down_cast(visited, so_stmt, lhs_type, gimple_assign_rhs1(so_stmt));
 }
 

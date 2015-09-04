@@ -117,6 +117,7 @@ extern int sysctl_modify_ldt;
 #ifdef CONFIG_LOCKUP_DETECTOR
 static int sixty __read_only = 60;
 #endif
+extern int sysctl_modify_ldt;
 
 static int __maybe_unused neg_one __read_only = -1;
 
@@ -948,6 +949,15 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "modify_ldt",
+		.data		= &sysctl_modify_ldt,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax_secure_sysadmin,
+		.extra1		= &zero,
+		.extra2		= &one,
 	},
 #endif
 	{
@@ -2189,6 +2199,44 @@ int proc_dointvec_secure(struct ctl_table *table, int write,
 		    	    do_proc_dointvec_conv_secure,NULL);
 }
 
+static int do_proc_dointvec_conv_secure(bool *negp, unsigned long *lvalp,
+				 int *valp,
+				 int write, void *data)
+{
+	if (write) {
+		if (*negp) {
+			if (*lvalp > (unsigned long) INT_MAX + 1)
+				return -EINVAL;
+			pax_open_kernel();
+			*valp = -*lvalp;
+			pax_close_kernel();
+		} else {
+			if (*lvalp > (unsigned long) INT_MAX)
+				return -EINVAL;
+			pax_open_kernel();
+			*valp = *lvalp;
+			pax_close_kernel();
+		}
+	} else {
+		int val = *valp;
+		if (val < 0) {
+			*negp = true;
+			*lvalp = (unsigned long)-val;
+		} else {
+			*negp = false;
+			*lvalp = (unsigned long)val;
+		}
+	}
+	return 0;
+}
+
+int proc_dointvec_secure(struct ctl_table *table, int write,
+		     void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+    return do_proc_dointvec(table,write,buffer,lenp,ppos,
+		    	    do_proc_dointvec_conv_secure,NULL);
+}
+
 /*
  * Taint values can only be increased
  * This means we can safely use a temporary.
@@ -2288,6 +2336,32 @@ static int do_proc_dointvec_minmax_conv_secure(bool *negp, unsigned long *lvalp,
 	return 0;
 }
 
+static int do_proc_dointvec_minmax_conv_secure(bool *negp, unsigned long *lvalp,
+					int *valp,
+					int write, void *data)
+{
+	struct do_proc_dointvec_minmax_conv_param *param = data;
+	if (write) {
+		int val = *negp ? -*lvalp : *lvalp;
+		if ((param->min && *param->min > val) ||
+		    (param->max && *param->max < val))
+			return -EINVAL;
+		pax_open_kernel();
+		*valp = val;
+		pax_close_kernel();
+	} else {
+		int val = *valp;
+		if (val < 0) {
+			*negp = true;
+			*lvalp = (unsigned long)-val;
+		} else {
+			*negp = false;
+			*lvalp = (unsigned long)val;
+		}
+	}
+	return 0;
+}
+
 /**
  * proc_dointvec_minmax - read a vector of integers with min/max values
  * @table: the sysctl table
@@ -2313,6 +2387,17 @@ int proc_dointvec_minmax(struct ctl_table *table, int write,
 	};
 	return do_proc_dointvec(table, write, buffer, lenp, ppos,
 				do_proc_dointvec_minmax_conv, &param);
+}
+
+int proc_dointvec_minmax_secure(struct ctl_table *table, int write,
+		  void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct do_proc_dointvec_minmax_conv_param param = {
+		.min = (int *) table->extra1,
+		.max = (int *) table->extra2,
+	};
+	return do_proc_dointvec(table, write, buffer, lenp, ppos,
+				do_proc_dointvec_minmax_conv_secure, &param);
 }
 
 int proc_dointvec_minmax_secure(struct ctl_table *table, int write,
