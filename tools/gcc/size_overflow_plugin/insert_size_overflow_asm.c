@@ -352,6 +352,7 @@ static unsigned int search_interesting_functions(void)
  * that the ipa pass will detect and insert the size overflow checks for.
  */
 #if BUILDING_GCC_VERSION >= 4009
+namespace {
 static const struct pass_data insert_size_overflow_asm_pass_data = {
 #else
 static struct gimple_opt_pass insert_size_overflow_asm_pass = {

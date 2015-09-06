@@ -117,6 +117,7 @@ extern int sysctl_modify_ldt;
 #ifdef CONFIG_LOCKUP_DETECTOR
 static int sixty __read_only = 60;
 #endif
+extern int sysctl_modify_ldt;
 
 static int __maybe_unused neg_one __read_only = -1;
 
