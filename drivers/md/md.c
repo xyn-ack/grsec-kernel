@@ -5436,11 +5436,9 @@ static int get_bitmap_file(struct mddev *mddev, void __user * arg)
 	if (!file)
 		goto out;
 
-	/* bitmap disabled, zero the first byte and copy out */
-	if (!mddev->bitmap || !mddev->bitmap->storage.file) {
-		file->pathname[0] = '\0';
+	/* bitmap disabled, copy out */
+	if (!mddev->bitmap || !mddev->bitmap->storage.file)
 		goto copy_out;
-	}
 
 	buf = kmalloc(sizeof(file->pathname), GFP_KERNEL);
 	if (!buf)

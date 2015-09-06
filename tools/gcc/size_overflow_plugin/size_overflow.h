@@ -202,6 +202,7 @@ extern unsigned int get_correct_argnum(const_tree decl, const_tree correct_argnu
 extern bool is_valid_cgraph_node(struct cgraph_node *node);
 extern void set_current_function_decl(tree fndecl);
 extern void unset_current_function_decl(void);
+extern tree get_lhs(const_gimple stmt);
 extern gimple get_def_stmt(const_tree node);
 extern tree create_new_var(tree type);
 extern gimple build_cast_stmt(struct visited *visited, tree dst_type, tree rhs, tree lhs, gimple_stmt_iterator *gsi, bool before, bool force);
