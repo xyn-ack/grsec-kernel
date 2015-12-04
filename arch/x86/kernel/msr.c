@@ -39,6 +39,7 @@
 #include <linux/notifier.h>
 #include <linux/uaccess.h>
 #include <linux/gfp.h>
+#include <linux/grsecurity.h>
 
 #include <asm/processor.h>
 #include <asm/msr.h>
@@ -105,6 +106,11 @@ static ssize_t msr_write(struct file *file, const char __user *buf,
 	int err = 0;
 	ssize_t bytes = 0;
 
+#ifdef CONFIG_GRKERNSEC_KMEM
+	gr_handle_msr_write();
+	return -EPERM;
+#endif
+
 	if (count % 8)
 		return -EINVAL;	/* Invalid chunk size */
 
@@ -152,6 +158,10 @@ static long msr_ioctl(struct file *file, unsigned int ioc, unsigned long arg)
 			err = -EBADF;
 			break;
 		}
+#ifdef CONFIG_GRKERNSEC_KMEM
+		gr_handle_msr_write();
+		return -EPERM;
+#endif
 		if (copy_from_user(&regs, uregs, sizeof regs)) {
 			err = -EFAULT;
 			break;

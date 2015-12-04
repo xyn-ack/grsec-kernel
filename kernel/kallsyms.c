@@ -11,6 +11,9 @@
  *      Changed the compression method from stem compression to "table lookup"
  *      compression (see scripts/kallsyms.c for a more complete description)
  */
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+#define __INCLUDED_BY_HIDESYM 1
+#endif
 #include <linux/kallsyms.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -564,6 +567,11 @@ static int s_show(struct seq_file *m, void *p)
 {
 	struct kallsym_iter *iter = m->private;
 
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return 0;
+#endif
+
 	/* Some debugging symbols have no name.  Ignore them. */
 	if (!iter->name[0])
 		return 0;
@@ -577,6 +585,7 @@ static int s_show(struct seq_file *m, void *p)
 		 */
 		type = iter->exported ? toupper(iter->type) :
 					tolower(iter->type);
+
 		seq_printf(m, "%pK %c %s\t[%s]\n", (void *)iter->value,
 			   type, iter->name, iter->module_name);
 	} else

@@ -372,6 +372,9 @@ __sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags, int override_rlimi
 	atomic_inc(&user->sigpending);
 	rcu_read_unlock();
 
+	if (!override_rlimit)
+		gr_learn_resource(t, RLIMIT_SIGPENDING, atomic_read(&user->sigpending), 1);
+
 	if (override_rlimit ||
 	    atomic_read(&user->sigpending) <=
 			task_rlimit(t, RLIMIT_SIGPENDING)) {
@@ -793,6 +796,13 @@ static int check_kill_permission(int sig, struct siginfo *info,
 		}
 	}
 
+	/* allow glibc communication via tgkill to other threads in our
+	   thread group */
+	if ((info == SEND_SIG_NOINFO || info->si_code != SI_TKILL ||
+	     sig != (SIGRTMIN+1) || task_tgid_vnr(t) != info->si_pid)
+	    && gr_handle_signal(t, sig))
+		return -EPERM;
+
 	return security_task_kill(t, info, sig, 0);
 }
 
@@ -1176,7 +1186,7 @@ __group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
 	return send_signal(sig, info, p, 1);
 }
 
-static int
+int
 specific_send_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 {
 	return send_signal(sig, info, t, 0);
@@ -1213,6 +1223,7 @@ force_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	unsigned long int flags;
 	int ret, blocked, ignored;
 	struct k_sigaction *action;
+	int is_unhandled = 0;
 
 	spin_lock_irqsave(&t->sighand->siglock, flags);
 	action = &t->sighand->action[sig-1];
@@ -1227,8 +1238,17 @@ force_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	}
 	if (action->sa.sa_handler == SIG_DFL)
 		t->signal->flags &= ~SIGNAL_UNKILLABLE;
+	if (action->sa.sa_handler == SIG_IGN || action->sa.sa_handler == SIG_DFL)
+		is_unhandled = 1;
 	ret = specific_send_sig_info(sig, info, t);
 	spin_unlock_irqrestore(&t->sighand->siglock, flags);
+
+	/* only deal with unhandled signals, java etc trigger SIGSEGV during
+	   normal operation */
+	if (is_unhandled) {
+		gr_log_signal(sig, !is_si_special(info) ? info->si_addr : NULL, t);
+		gr_handle_crash(t, sig);
+	}
 
 	return ret;
 }
@@ -1310,8 +1330,11 @@ int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
 	ret = check_kill_permission(sig, info, p);
 	rcu_read_unlock();
 
-	if (!ret && sig)
+	if (!ret && sig) {
 		ret = do_send_sig_info(sig, info, p, true);
+		if (!ret)
+			gr_log_signal(sig, !is_si_special(info) ? info->si_addr : NULL, p);
+	}
 
 	return ret;
 }
@@ -2918,7 +2941,15 @@ do_send_specific(pid_t tgid, pid_t pid, int sig, struct siginfo *info)
 	int error = -ESRCH;
 
 	rcu_read_lock();
-	p = find_task_by_vpid(pid);
+#ifdef CONFIG_GRKERNSEC_CHROOT_FINDTASK
+	/* allow glibc communication via tgkill to other threads in our
+	   thread group */
+	if (grsec_enable_chroot_findtask && info->si_code == SI_TKILL &&
+	    sig == (SIGRTMIN+1) && tgid == info->si_pid)	    
+		p = find_task_by_vpid_unrestricted(pid);
+	else
+#endif
+		p = find_task_by_vpid(pid);
 	if (p && (tgid <= 0 || task_tgid_vnr(p) == tgid)) {
 		error = check_kill_permission(sig, info, p);
 		/*

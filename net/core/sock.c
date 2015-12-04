@@ -907,6 +907,7 @@ set_rcvbuf:
 		}
 		break;
 
+#ifndef GRKERNSEC_BPF_HARDEN
 	case SO_ATTACH_BPF:
 		ret = -EINVAL;
 		if (optlen == sizeof(u32)) {
@@ -919,7 +920,7 @@ set_rcvbuf:
 			ret = sk_attach_bpf(ufd, sk);
 		}
 		break;
-
+#endif
 	case SO_DETACH_FILTER:
 		ret = sk_detach_filter(sk);
 		break;

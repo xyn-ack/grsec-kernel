@@ -97,6 +97,8 @@ extern void radix_tree_init(void);
 static inline void mark_rodata_ro(void) { }
 #endif
 
+extern void grsecurity_init(void);
+
 /*
  * Debug helper: via this flag we know that we are in 'early bootup code'
  * where only the boot processor is running with IRQ disabled.  This means
@@ -157,6 +159,26 @@ static int __init set_reset_devices(char *str)
 }
 
 __setup("reset_devices", set_reset_devices);
+
+#ifdef CONFIG_GRKERNSEC_PROC_USERGROUP
+kgid_t grsec_proc_gid = KGIDT_INIT(CONFIG_GRKERNSEC_PROC_GID);
+static int __init setup_grsec_proc_gid(char *str)
+{
+	grsec_proc_gid = KGIDT_INIT(simple_strtol(str, NULL, 0));
+	return 1;
+}
+__setup("grsec_proc_gid=", setup_grsec_proc_gid);
+#endif
+#ifdef CONFIG_GRKERNSEC_SYSFS_RESTRICT
+int grsec_enable_sysfs_restrict = 1;
+static int __init setup_grsec_sysfs_restrict(char *str)
+{
+	if (!simple_strtol(str, NULL, 0))
+		grsec_enable_sysfs_restrict = 0;
+	return 1;
+}
+__setup("grsec_sysfs_restrict", setup_grsec_sysfs_restrict);
+#endif
 
 #ifdef CONFIG_PAX_SOFTMODE
 int pax_softmode;
@@ -737,7 +759,7 @@ static bool __init_or_module initcall_blacklisted(initcall_t fn)
 	struct blacklist_entry *entry;
 	char *fn_name;
 
-	fn_name = kasprintf(GFP_KERNEL, "%pf", fn);
+	fn_name = kasprintf(GFP_KERNEL, "%pX", fn);
 	if (!fn_name)
 		return false;
 
@@ -933,6 +955,10 @@ static int try_to_run_init_process(const char *init_filename)
 	return ret;
 }
 
+#ifdef CONFIG_GRKERNSEC_CHROOT_INITRD
+extern int gr_init_ran;
+#endif
+
 static noinline void __init kernel_init_freeable(void);
 
 static int __ref kernel_init(void *unused)
@@ -956,6 +982,11 @@ static int __ref kernel_init(void *unused)
 		pr_err("Failed to execute %s (error %d)\n",
 		       ramdisk_execute_command, ret);
 	}
+
+#ifdef CONFIG_GRKERNSEC_CHROOT_INITRD
+	/* if no initrd was used, be extra sure we enforce chroot restrictions */
+	gr_init_ran = 1;
+#endif
 
 	/*
 	 * We try each of these until one succeeds.
@@ -1029,6 +1060,8 @@ static noinline void __init kernel_init_freeable(void)
 		ramdisk_execute_command = NULL;
 		prepare_namespace();
 	}
+
+	grsecurity_init();
 
 	/*
 	 * Ok, we have completed the initial bootup, and

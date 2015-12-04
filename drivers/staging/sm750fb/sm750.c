@@ -829,6 +829,9 @@ static int lynxfb_set_fbinfo(struct fb_info *info, int index)
 	output->channel = &crtc->channel;
 	sm750fb_set_drv(par);
 
+	pax_open_kernel();
+	*(void **)&lynxfb_ops.fb_pan_display = lynxfb_ops_pan_display;
+	pax_close_kernel();
 
 	/* set current cursor variable and proc pointer,
 	 * must be set after crtc member initialized */

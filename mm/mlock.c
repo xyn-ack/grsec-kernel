@@ -14,6 +14,7 @@
 #include <linux/pagevec.h>
 #include <linux/mempolicy.h>
 #include <linux/syscalls.h>
+#include <linux/security.h>
 #include <linux/sched.h>
 #include <linux/export.h>
 #include <linux/rmap.h>
@@ -635,6 +636,7 @@ SYSCALL_DEFINE2(mlock, unsigned long, start, size_t, len)
 	locked += current->mm->locked_vm;
 
 	/* check against resource limits */
+	gr_learn_resource(current, RLIMIT_MEMLOCK, (current->mm->locked_vm << PAGE_SHIFT) + len, 1);
 	if ((locked <= lock_limit) || capable(CAP_IPC_LOCK))
 		error = do_mlock(start, len, 1);
 
@@ -712,8 +714,10 @@ SYSCALL_DEFINE1(mlockall, int, flags)
 	lock_limit >>= PAGE_SHIFT;
 
 	ret = -ENOMEM;
-	down_write(&current->mm->mmap_sem);
 
+	gr_learn_resource(current, RLIMIT_MEMLOCK, current->mm->total_vm << PAGE_SHIFT, 1);
+
+	down_write(&current->mm->mmap_sem);
 	if (!(flags & MCL_CURRENT) || (current->mm->total_vm <= lock_limit) ||
 	    capable(CAP_IPC_LOCK))
 		ret = do_mlockall(flags);

@@ -60,6 +60,7 @@
 #include <linux/tty.h>
 #include <linux/string.h>
 #include <linux/mman.h>
+#include <linux/grsecurity.h>
 #include <linux/proc_fs.h>
 #include <linux/ioport.h>
 #include <linux/uaccess.h>
@@ -378,8 +379,18 @@ int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
 	task_pax(m, task);
 #endif
 
+#if defined(CONFIG_GRKERNSEC) && !defined(CONFIG_GRKERNSEC_NO_RBAC)
+	task_grsec_rbac(m, task);
+#endif
+
 	return 0;
 }
+
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+#define PAX_RAND_FLAGS(_mm) (_mm != NULL && _mm != current->mm && \
+			     (_mm->pax_flags & MF_PAX_RANDMMAP || \
+			      _mm->pax_flags & MF_PAX_SEGMEXEC))
+#endif
 
 static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 			struct pid *pid, struct task_struct *task, int whole)
@@ -401,6 +412,13 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 	unsigned long rsslim = 0;
 	char tcomm[sizeof(task->comm)];
 	unsigned long flags;
+
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+	if (current->exec_id != m->exec_id) {
+		gr_log_badprocpid("stat");
+		return 0;
+	}
+#endif
 
 	state = *get_task_state(task);
 	vsize = eip = esp = 0;
@@ -472,6 +490,19 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 		gtime = task_gtime(task);
 	}
 
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+	if (PAX_RAND_FLAGS(mm)) {
+		eip = 0;
+		esp = 0;
+		wchan = 0;
+	}
+#endif
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+	wchan = 0;
+	eip =0;
+	esp =0;
+#endif
+
 	/* scale priority and nice values from timeslices to -20..20 */
 	/* to make it look like a "normal" Unix priority/nice value  */
 	priority = task_prio(task);
@@ -503,9 +534,15 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 	seq_put_decimal_ull(m, ' ', vsize);
 	seq_put_decimal_ull(m, ' ', mm ? get_mm_rss(mm) : 0);
 	seq_put_decimal_ull(m, ' ', rsslim);
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+	seq_put_decimal_ull(m, ' ', PAX_RAND_FLAGS(mm) ? 1 : (mm ? (permitted ? mm->start_code : 1) : 0));
+	seq_put_decimal_ull(m, ' ', PAX_RAND_FLAGS(mm) ? 1 : (mm ? (permitted ? mm->end_code : 1) : 0));
+	seq_put_decimal_ull(m, ' ', PAX_RAND_FLAGS(mm) ? 0 : ((permitted && mm) ? mm->start_stack : 0));
+#else
 	seq_put_decimal_ull(m, ' ', mm ? (permitted ? mm->start_code : 1) : 0);
 	seq_put_decimal_ull(m, ' ', mm ? (permitted ? mm->end_code : 1) : 0);
 	seq_put_decimal_ull(m, ' ', (permitted && mm) ? mm->start_stack : 0);
+#endif
 	seq_put_decimal_ull(m, ' ', esp);
 	seq_put_decimal_ull(m, ' ', eip);
 	/* The signal information here is obsolete.
@@ -527,7 +564,11 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 	seq_put_decimal_ull(m, ' ', cputime_to_clock_t(gtime));
 	seq_put_decimal_ll(m, ' ', cputime_to_clock_t(cgtime));
 
-	if (mm && permitted) {
+	if (mm && permitted
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+		&& !PAX_RAND_FLAGS(mm)
+#endif
+	   ) {
 		seq_put_decimal_ull(m, ' ', mm->start_data);
 		seq_put_decimal_ull(m, ' ', mm->end_data);
 		seq_put_decimal_ull(m, ' ', mm->start_brk);
@@ -565,8 +606,15 @@ int proc_pid_statm(struct seq_file *m, struct pid_namespace *ns,
 			struct pid *pid, struct task_struct *task)
 {
 	unsigned long size = 0, resident = 0, shared = 0, text = 0, data = 0;
-	struct mm_struct *mm = get_task_mm(task);
+	struct mm_struct *mm;
 
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+	if (current->exec_id != m->exec_id) {
+		gr_log_badprocpid("statm");
+		return 0;
+	}
+#endif
+	mm = get_task_mm(task);
 	if (mm) {
 		size = task_statm(mm, &shared, &text, &data, &resident);
 		mmput(mm);
@@ -588,6 +636,20 @@ int proc_pid_statm(struct seq_file *m, struct pid_namespace *ns,
 
 	return 0;
 }
+
+#ifdef CONFIG_GRKERNSEC_PROC_IPADDR
+int proc_pid_ipaddr(struct seq_file *m, struct pid_namespace *ns, struct pid *pid, struct task_struct *task)
+{
+	unsigned long flags;
+	u32 curr_ip = 0;
+
+	if (lock_task_sighand(task, &flags)) {
+		curr_ip = task->signal->curr_ip;
+		unlock_task_sighand(task, &flags);
+	}
+	return seq_printf(m, "%pI4\n", &curr_ip);
+}
+#endif
 
 #ifdef CONFIG_CHECKPOINT_RESTORE
 static struct pid *

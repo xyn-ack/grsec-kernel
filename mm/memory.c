@@ -695,7 +695,7 @@ static void print_bad_pte(struct vm_area_struct *vma, unsigned long addr,
 	/*
 	 * Choose text because data symbols depend on CONFIG_KALLSYMS_ALL=y
 	 */
-	pr_alert("file:%pD fault:%pf mmap:%pf readpage:%pf\n",
+	pr_alert("file:%pD fault:%pX mmap:%pX readpage:%pX\n",
 		 vma->vm_file,
 		 vma->vm_ops ? vma->vm_ops->fault : NULL,
 		 vma->vm_file ? vma->vm_file->f_op->mmap : NULL,

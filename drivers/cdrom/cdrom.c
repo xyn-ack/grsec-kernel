@@ -2127,7 +2127,7 @@ static int cdrom_read_cdda_old(struct cdrom_device_info *cdi, __u8 __user *ubuf,
 	 */
 	nr = nframes;
 	do {
-		cgc.buffer = kmalloc(CD_FRAMESIZE_RAW * nr, GFP_KERNEL);
+		cgc.buffer = kzalloc(CD_FRAMESIZE_RAW * nr, GFP_KERNEL);
 		if (cgc.buffer)
 			break;
 

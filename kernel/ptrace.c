@@ -321,7 +321,7 @@ static int ptrace_attach(struct task_struct *task, long request,
 	if (seize)
 		flags |= PT_SEIZED;
 	rcu_read_lock();
-	if (ns_capable(__task_cred(task)->user_ns, CAP_SYS_PTRACE))
+	if (ns_capable_nolog(__task_cred(task)->user_ns, CAP_SYS_PTRACE))
 		flags |= PT_PTRACE_CAP;
 	rcu_read_unlock();
 	task->ptrace = flags;
@@ -1048,14 +1048,21 @@ SYSCALL_DEFINE4(ptrace, long, request, long, pid, unsigned long, addr,
 		goto out;
 	}
 
+	if (gr_handle_ptrace(child, request)) {
+		ret = -EPERM;
+		goto out_put_task_struct;
+	}
+
 	if (request == PTRACE_ATTACH || request == PTRACE_SEIZE) {
 		ret = ptrace_attach(child, request, addr, data);
 		/*
 		 * Some architectures need to do book-keeping after
 		 * a ptrace attach.
 		 */
-		if (!ret)
+		if (!ret) {
 			arch_ptrace_attach(child);
+			gr_audit_ptrace(child);
+		}
 		goto out_put_task_struct;
 	}
 
@@ -1192,14 +1199,21 @@ COMPAT_SYSCALL_DEFINE4(ptrace, compat_long_t, request, compat_long_t, pid,
 		goto out;
 	}
 
+	if (gr_handle_ptrace(child, request)) {
+		ret = -EPERM;
+		goto out_put_task_struct;
+	}
+
 	if (request == PTRACE_ATTACH || request == PTRACE_SEIZE) {
 		ret = ptrace_attach(child, request, addr, data);
 		/*
 		 * Some architectures need to do book-keeping after
 		 * a ptrace attach.
 		 */
-		if (!ret)
+		if (!ret) {
 			arch_ptrace_attach(child);
+			gr_audit_ptrace(child);
+		}
 		goto out_put_task_struct;
 	}
 

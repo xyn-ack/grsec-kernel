@@ -595,7 +595,12 @@ setup_rt_frame(struct ksignal *ksig, struct pt_regs *regs)
 {
 	int usig = ksig->sig;
 	sigset_t *set = sigmask_to_save();
-	compat_sigset_t *cset = (compat_sigset_t *) set;
+	sigset_t sigcopy;
+	compat_sigset_t *cset;
+
+	sigcopy = *set;
+
+	cset = (compat_sigset_t *) &sigcopy;
 
 	/* Set up the stack frame */
 	if (is_ia32_frame()) {
@@ -606,7 +611,7 @@ setup_rt_frame(struct ksignal *ksig, struct pt_regs *regs)
 	} else if (is_x32_frame()) {
 		return x32_setup_rt_frame(ksig, cset, regs);
 	} else {
-		return __setup_rt_frame(ksig->sig, ksig, set, regs);
+		return __setup_rt_frame(ksig->sig, ksig, &sigcopy, regs);
 	}
 }
 

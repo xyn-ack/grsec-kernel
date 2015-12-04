@@ -25,7 +25,8 @@ static unsigned long hugetlb_get_unmapped_area_bottomup(struct file *filp,
 							unsigned long addr,
 							unsigned long len,
 							unsigned long pgoff,
-							unsigned long flags)
+							unsigned long flags,
+							unsigned long offset)
 {
 	struct mm_struct *mm = current->mm;
 	unsigned long task_size = TASK_SIZE;
@@ -40,6 +41,7 @@ static unsigned long hugetlb_get_unmapped_area_bottomup(struct file *filp,
 	info.high_limit = min(task_size, VA_EXCLUDE_START);
 	info.align_mask = PAGE_MASK & ~HPAGE_MASK;
 	info.align_offset = 0;
+	info.threadstack_offset = offset;
 	addr = vm_unmapped_area(&info);
 
 	if ((addr & ~PAGE_MASK) && task_size > VA_EXCLUDE_END) {
@@ -62,7 +64,8 @@ static unsigned long
 hugetlb_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 				  const unsigned long len,
 				  const unsigned long pgoff,
-				  const unsigned long flags)
+				  const unsigned long flags,
+				  const unsigned long offset)
 {
 	struct mm_struct *mm = current->mm;
 	unsigned long addr = addr0;
@@ -77,6 +80,7 @@ hugetlb_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 	info.high_limit = mm->mmap_base;
 	info.align_mask = PAGE_MASK & ~HPAGE_MASK;
 	info.align_offset = 0;
+	info.threadstack_offset = offset;
 	addr = vm_unmapped_area(&info);
 
 	/*
@@ -109,6 +113,7 @@ hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
 	unsigned long task_size = TASK_SIZE;
+	unsigned long offset = gr_rand_threadstack_offset(mm, file, flags);
 
 	if (test_thread_flag(TIF_32BIT))
 		task_size = STACK_TOP32;
@@ -131,15 +136,15 @@ hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 	if (addr) {
 		addr = ALIGN(addr, HPAGE_SIZE);
 		vma = find_vma(mm, addr);
-		if (task_size - len >= addr && check_heap_stack_gap(vma, addr, len))
+		if (task_size - len >= addr && check_heap_stack_gap(vma, addr, len, offset))
 			return addr;
 	}
 	if (mm->get_unmapped_area == arch_get_unmapped_area)
 		return hugetlb_get_unmapped_area_bottomup(file, addr, len,
-				pgoff, flags);
+				pgoff, flags, offset);
 	else
 		return hugetlb_get_unmapped_area_topdown(file, addr, len,
-				pgoff, flags);
+				pgoff, flags, offset);
 }
 
 pte_t *huge_pte_alloc(struct mm_struct *mm,

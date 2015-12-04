@@ -194,6 +194,48 @@ void thread_info_cache_init(void)
 # endif
 #endif
 
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+static inline struct thread_info *gr_alloc_thread_info_node(struct task_struct *tsk,
+						  int node, void **lowmem_stack)
+{
+	struct page *pages[THREAD_SIZE / PAGE_SIZE];
+	void *ret = NULL;
+	unsigned int i;
+
+	*lowmem_stack = alloc_thread_info_node(tsk, node);
+	if (*lowmem_stack == NULL)
+		goto out;
+
+	for (i = 0; i < THREAD_SIZE / PAGE_SIZE; i++)
+		pages[i] = virt_to_page(*lowmem_stack + (i * PAGE_SIZE));
+	
+	/* use VM_IOREMAP to gain THREAD_SIZE alignment */
+	ret = vmap(pages, THREAD_SIZE / PAGE_SIZE, VM_IOREMAP, PAGE_KERNEL);
+	if (ret == NULL) {
+		free_thread_info(*lowmem_stack);
+		*lowmem_stack = NULL;
+	}
+
+out:
+	return ret;
+}
+
+static inline void gr_free_thread_info(struct task_struct *tsk, struct thread_info *ti)
+{
+	unmap_process_stacks(tsk);
+}
+#else
+static inline struct thread_info *gr_alloc_thread_info_node(struct task_struct *tsk,
+						  int node, void **lowmem_stack)
+{
+	return alloc_thread_info_node(tsk, node);
+}
+static inline void gr_free_thread_info(struct task_struct *tsk, struct thread_info *ti)
+{
+	free_thread_info(ti);
+}
+#endif
+
 /* SLAB cache for signal_struct structures (tsk->signal) */
 static struct kmem_cache *signal_cachep;
 
@@ -212,18 +254,22 @@ struct kmem_cache *vm_area_cachep;
 /* SLAB cache for mm_struct structures (tsk->mm) */
 static struct kmem_cache *mm_cachep;
 
-static void account_kernel_stack(struct thread_info *ti, int account)
+static void account_kernel_stack(struct task_struct *tsk, struct thread_info *ti, int account)
 {
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+	struct zone *zone = page_zone(virt_to_page(tsk->lowmem_stack));
+#else
 	struct zone *zone = page_zone(virt_to_page(ti));
+#endif
 
 	mod_zone_page_state(zone, NR_KERNEL_STACK, account);
 }
 
 void free_task(struct task_struct *tsk)
 {
-	account_kernel_stack(tsk->stack, -1);
+	account_kernel_stack(tsk, tsk->stack, -1);
 	arch_release_thread_info(tsk->stack);
-	free_thread_info(tsk->stack);
+	gr_free_thread_info(tsk, tsk->stack);
 	rt_mutex_debug_task_free(tsk);
 	ftrace_graph_exit_task(tsk);
 	put_seccomp_filter(tsk);
@@ -329,6 +375,7 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 {
 	struct task_struct *tsk;
 	struct thread_info *ti;
+	void *lowmem_stack;
 	int node = tsk_fork_get_node(orig);
 	int err;
 
@@ -336,7 +383,7 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 	if (!tsk)
 		return NULL;
 
-	ti = alloc_thread_info_node(tsk, node);
+	ti = gr_alloc_thread_info_node(tsk, node, &lowmem_stack);
 	if (!ti)
 		goto free_tsk;
 
@@ -345,6 +392,9 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 		goto free_ti;
 
 	tsk->stack = ti;
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+	tsk->lowmem_stack = lowmem_stack;
+#endif
 #ifdef CONFIG_SECCOMP
 	/*
 	 * We must handle setting up seccomp filters once we're under
@@ -375,12 +425,12 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 	tsk->splice_pipe = NULL;
 	tsk->task_frag.page = NULL;
 
-	account_kernel_stack(ti, 1);
+	account_kernel_stack(tsk, ti, 1);
 
 	return tsk;
 
 free_ti:
-	free_thread_info(ti);
+	gr_free_thread_info(tsk, ti);
 free_tsk:
 	free_task_struct(tsk);
 	return NULL;
@@ -836,8 +886,8 @@ struct mm_struct *mm_access(struct task_struct *task, unsigned int mode)
 		return ERR_PTR(err);
 
 	mm = get_task_mm(task);
-	if (mm && mm != current->mm &&
-			!ptrace_may_access(task, mode)) {
+	if (mm && ((mm != current->mm && !ptrace_may_access(task, mode)) ||
+		  (mode == PTRACE_MODE_ATTACH && (gr_handle_proc_ptrace(task) || gr_acl_handle_procpidmem(task))))) {
 		mmput(mm);
 		mm = ERR_PTR(-EACCES);
 	}
@@ -1045,6 +1095,13 @@ static int copy_fs(unsigned long clone_flags, struct task_struct *tsk)
 	tsk->fs = copy_fs_struct(fs);
 	if (!tsk->fs)
 		return -ENOMEM;
+	/* Carry through gr_chroot_dentry and is_chrooted instead
+	   of recomputing it here.  Already copied when the task struct
+	   is duplicated.  This allows pivot_root to not be treated as
+	   a chroot
+	*/
+	//gr_set_chroot_entries(tsk, &tsk->fs->root);
+
 	return 0;
 }
 
@@ -1353,6 +1410,9 @@ static __latent_entropy struct task_struct *copy_process(unsigned long clone_fla
 	DEBUG_LOCKS_WARN_ON(!p->softirqs_enabled);
 #endif
 	retval = -EAGAIN;
+
+	gr_learn_resource(p, RLIMIT_NPROC, atomic_read(&p->real_cred->user->processes), 0);
+
 	if (atomic_read(&p->real_cred->user->processes) >=
 			task_rlimit(p, RLIMIT_NPROC)) {
 		if (p->real_cred->user != INIT_USER &&
@@ -1600,6 +1660,11 @@ static __latent_entropy struct task_struct *copy_process(unsigned long clone_fla
 		goto bad_fork_free_pid;
 	}
 
+	/* synchronizes with gr_set_acls()
+	   we need to call this past the point of no return for fork()
+	*/
+	gr_copy_label(p);
+
 	if (likely(p->pid)) {
 		ptrace_init_task(p, (clone_flags & CLONE_PTRACE) || trace);
 
@@ -1689,6 +1754,8 @@ bad_fork_cleanup_count:
 bad_fork_free:
 	free_task(p);
 fork_out:
+	gr_log_forkfail(retval);
+
 	return ERR_PTR(retval);
 }
 
@@ -1766,6 +1833,8 @@ long do_fork(unsigned long clone_flags,
 
 		if (clone_flags & CLONE_PARENT_SETTID)
 			put_user(nr, parent_tidptr);
+
+		gr_handle_brute_check();
 
 		if (clone_flags & CLONE_VFORK) {
 			p->vfork_done = &vfork;
@@ -2045,6 +2114,7 @@ SYSCALL_DEFINE1(unshare, unsigned long, unshare_flags)
 			fs = current->fs;
 			spin_lock(&fs->lock);
 			current->fs = new_fs;
+			gr_set_chroot_entries(current, &current->fs->root);
 			if (atomic_dec_return(&fs->users))
 				new_fs = NULL;
 			else

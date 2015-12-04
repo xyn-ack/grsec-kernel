@@ -638,6 +638,7 @@ config SCHED_OMIT_FRAME_POINTER
 
 menuconfig HYPERVISOR_GUEST
 	bool "Linux guest support"
+	depends on !GRKERNSEC_CONFIG_AUTO || GRKERNSEC_CONFIG_VIRT_GUEST || (GRKERNSEC_CONFIG_VIRT_HOST && GRKERNSEC_CONFIG_VIRT_XEN)
 	---help---
 	  Say Y here to enable options for running Linux under various hyper-
 	  visors. This option enables basic hypervisor detection and platform
@@ -1005,6 +1006,7 @@ config VM86
 
 config X86_16BIT
 	bool "Enable support for 16-bit segments" if EXPERT
+	depends on !GRKERNSEC
 	default y
 	---help---
 	  This option is required by programs like Wine to run 16-bit
@@ -1178,6 +1180,7 @@ choice
 
 config NOHIGHMEM
 	bool "off"
+	depends on !(PAX_PAGEEXEC && PAX_ENABLE_PAE)
 	---help---
 	  Linux can use up to 64 Gigabytes of physical memory on x86 systems.
 	  However, the address space of 32-bit x86 processors is only 4
@@ -1214,6 +1217,7 @@ config NOHIGHMEM
 
 config HIGHMEM4G
 	bool "4GB"
+	depends on !(PAX_PAGEEXEC && PAX_ENABLE_PAE)
 	---help---
 	  Select this if you have a 32-bit processor and between 1 and 4
 	  gigabytes of physical RAM.
@@ -1716,6 +1720,7 @@ source kernel/Kconfig.hz
 
 config KEXEC
 	bool "kexec system call"
+	depends on !GRKERNSEC_KMEM
 	---help---
 	  kexec is a system call that implements the ability to shutdown your
 	  current kernel, and to start another kernel.  It is like a reboot
@@ -2047,6 +2052,22 @@ config CMDLINE_OVERRIDE
 
 	  This is used to work around broken boot loaders.  This should
 	  be set to 'N' under normal conditions.
+
+config DEFAULT_MODIFY_LDT_SYSCALL
+	bool "Allow userspace to modify the LDT by default"
+	default y
+
+	---help---
+	  Modifying the LDT (Local Descriptor Table) may be needed to run a
+	  16-bit or segmented code such as Dosemu or Wine. This is done via
+	  a system call which is not needed to run portable applications,
+	  and which can sometimes be abused to exploit some weaknesses of
+	  the architecture, opening new vulnerabilities.
+
+	  For this reason this option allows one to enable or disable the
+	  feature at runtime. It is recommended to say 'N' here to leave
+	  the system protected, and to enable it at runtime only if needed
+	  by setting the sys.kernel.modify_ldt sysctl.
 
 source "kernel/livepatch/Kconfig"
 

@@ -80,8 +80,9 @@ struct kobject {
 
 extern __printf(2, 3)
 int kobject_set_name(struct kobject *kobj, const char *name, ...);
-extern int kobject_set_name_vargs(struct kobject *kobj, const char *fmt,
-				  va_list vargs);
+extern __printf(2, 0)
+int kobject_set_name_vargs(struct kobject *kobj, const char *fmt,
+			   va_list vargs);
 
 static inline const char *kobject_name(const struct kobject *kobj)
 {
@@ -170,7 +171,7 @@ struct kset {
 	spinlock_t list_lock;
 	struct kobject kobj;
 	const struct kset_uevent_ops *uevent_ops;
-};
+} __randomize_layout;
 
 extern void kset_init(struct kset *kset);
 extern int __must_check kset_register(struct kset *kset);

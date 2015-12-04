@@ -622,6 +622,7 @@ endif
 # Tell gcc to never replace conditional load with a non-conditional one
 KBUILD_CFLAGS	+= $(call cc-option,--param=allow-store-data-races=0)
 
+ifndef DISABLE_PAX_PLUGINS
 ifeq ($(call cc-ifversion, -ge, 0408, y), y)
 PLUGINCC := $(shell $(CONFIG_SHELL) $(srctree)/scripts/gcc-plugin.sh "$(HOSTCXX)" "$(HOSTCXX)" "$(CC)")
 else
@@ -643,6 +644,12 @@ KERNEXEC_PLUGIN_CFLAGS := -fplugin=$(objtree)/tools/gcc/kernexec_plugin.so
 KERNEXEC_PLUGIN_CFLAGS += -fplugin-arg-kernexec_plugin-method=$(CONFIG_PAX_KERNEXEC_PLUGIN_METHOD) -DKERNEXEC_PLUGIN
 KERNEXEC_PLUGIN_AFLAGS := -DKERNEXEC_PLUGIN
 endif
+ifdef CONFIG_GRKERNSEC_RANDSTRUCT
+RANDSTRUCT_PLUGIN_CFLAGS := -fplugin=$(objtree)/tools/gcc/randomize_layout_plugin.so -DRANDSTRUCT_PLUGIN
+ifdef CONFIG_GRKERNSEC_RANDSTRUCT_PERFORMANCE
+RANDSTRUCT_PLUGIN_CFLAGS += -fplugin-arg-randomize_layout_plugin-performance-mode
+endif
+endif
 ifdef CONFIG_CHECKER_PLUGIN
 ifeq ($(call cc-ifversion, -ge, 0406, y), y)
 CHECKER_PLUGIN_CFLAGS := -fplugin=$(objtree)/tools/gcc/checker_plugin.so -DCHECKER_PLUGIN
@@ -663,6 +670,7 @@ GCC_PLUGINS_CFLAGS := $(CONSTIFY_PLUGIN_CFLAGS) $(STACKLEAK_PLUGIN_CFLAGS) $(KAL
 GCC_PLUGINS_CFLAGS += $(KERNEXEC_PLUGIN_CFLAGS) $(CHECKER_PLUGIN_CFLAGS) $(COLORIZE_PLUGIN_CFLAGS)
 GCC_PLUGINS_CFLAGS += $(SIZE_OVERFLOW_PLUGIN_CFLAGS) $(LATENT_ENTROPY_PLUGIN_CFLAGS) $(STRUCTLEAK_PLUGIN_CFLAGS)
 GCC_PLUGINS_CFLAGS += $(INITIFY_PLUGIN_CFLAGS)
+GCC_PLUGINS_CFLAGS += $(RANDSTRUCT_PLUGIN_CFLAGS)
 GCC_PLUGINS_AFLAGS := $(KERNEXEC_PLUGIN_AFLAGS)
 export PLUGINCC GCC_PLUGINS_CFLAGS GCC_PLUGINS_AFLAGS CONSTIFY_PLUGIN LATENT_ENTROPY_PLUGIN_CFLAGS
 ifeq ($(KBUILD_EXTMOD),)
@@ -674,11 +682,12 @@ endif
 else
 gcc-plugins:
 ifeq ($(call cc-ifversion, -ge, 0405, y), y)
-	$(Q)echo "warning, your gcc installation does not support plugins, perhaps the necessary headers are missing?"
+	$(error Your gcc installation does not support plugins.  If the necessary headers for plugin support are missing, they should be installed.  On Debian, apt-get install gcc-<ver>-plugin-dev.  If you choose to ignore this error and lessen the improvements provided by this patch, re-run make with the DISABLE_PAX_PLUGINS=y argument.))
 else
 	$(Q)echo "warning, your gcc version does not support plugins, you should upgrade it to gcc 4.5 at least"
 endif
-	$(Q)echo "PAX_MEMORY_STACKLEAK and other features will be less secure"
+	$(Q)echo "PAX_MEMORY_STACKLEAK, constification, PAX_LATENT_ENTROPY and other features will be less secure.  PAX_SIZE_OVERFLOW will not be active."
+endif
 endif
 
 ifdef CONFIG_READABLE_ASM
@@ -945,7 +954,7 @@ export mod_sign_cmd
 
 
 ifeq ($(KBUILD_EXTMOD),)
-core-y		+= kernel/ mm/ fs/ ipc/ security/ crypto/ block/
+core-y		+= kernel/ mm/ fs/ ipc/ security/ crypto/ block/ grsecurity/
 
 vmlinux-dirs	:= $(patsubst %/,%,$(filter %/, $(init-y) $(init-m) \
 		     $(core-y) $(core-m) $(drivers-y) $(drivers-m) \
@@ -1248,7 +1257,8 @@ MRPROPER_FILES += .config .config.old .version .old_version \
 		  extra_certificates signing_key.x509.keyid		\
 		  signing_key.x509.signer vmlinux-gdb.py \
 		  tools/gcc/size_overflow_plugin/size_overflow_hash_aux.h \
-		  tools/gcc/size_overflow_plugin/size_overflow_hash.h
+		  tools/gcc/size_overflow_plugin/size_overflow_hash.h \
+		  tools/gcc/randomize_layout_seed.h
 
 # clean - Delete most, but leave enough to build external modules
 #

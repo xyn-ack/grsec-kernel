@@ -2,6 +2,9 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  *  Copyright (C) 2000, 2001, 2002 Andi Kleen, SuSE Labs
  */
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+#define __INCLUDED_BY_HIDESYM 1
+#endif
 #include <linux/kallsyms.h>
 #include <linux/kprobes.h>
 #include <linux/uaccess.h>
@@ -35,7 +38,7 @@ static void printk_stack_address(unsigned long address, int reliable,
 
 void printk_address(unsigned long address)
 {
-	pr_cont(" [<%p>] %pS\n", (void *)address, (void *)address);
+	pr_cont(" [<%p>] %pA\n", (void *)address, (void *)address);
 }
 
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
@@ -222,6 +225,8 @@ unsigned long oops_begin(void)
 EXPORT_SYMBOL_GPL(oops_begin);
 NOKPROBE_SYMBOL(oops_begin);
 
+extern void gr_handle_kernel_exploit(void);
+
 void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 {
 	if (regs && kexec_should_crash(current))
@@ -243,6 +248,9 @@ void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 		panic("Fatal exception in interrupt");
 	if (panic_on_oops)
 		panic("Fatal exception");
+
+	gr_handle_kernel_exploit();
+
 	do_group_exit(signr);
 }
 NOKPROBE_SYMBOL(oops_end);

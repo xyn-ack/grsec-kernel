@@ -199,7 +199,7 @@ struct track {
 
 enum track_item { TRACK_ALLOC, TRACK_FREE };
 
-#ifdef CONFIG_SYSFS
+#if defined(CONFIG_SYSFS) && !defined(CONFIG_GRKERNSEC_PROC_ADD)
 static int sysfs_slab_add(struct kmem_cache *);
 static int sysfs_slab_alias(struct kmem_cache *, const char *);
 static void memcg_propagate_slab_attrs(struct kmem_cache *s);
@@ -557,7 +557,7 @@ static void print_track(const char *s, struct track *t)
 	if (!t->addr)
 		return;
 
-	pr_err("INFO: %s in %pS age=%lu cpu=%u pid=%d\n",
+	pr_err("INFO: %s in %pA age=%lu cpu=%u pid=%d\n",
 	       s, (void *)t->addr, jiffies - t->when, t->cpu, t->pid);
 #ifdef CONFIG_STACKTRACE
 	{
@@ -3411,6 +3411,17 @@ bool is_usercopy_object(const void *ptr)
 	if (!slab_is_available())
 		return false;
 
+	if (is_vmalloc_addr(ptr)
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+	    && !object_starts_on_stack(ptr)
+#endif
+	) {
+		struct vm_struct *vm = find_vm_area(ptr);
+		if (vm && (vm->flags & VM_USERCOPY))
+			return true;
+		return false;
+	}
+
 	if (!virt_addr_valid(ptr))
 		return false;
 
@@ -3923,7 +3934,7 @@ void *__kmalloc_node_track_caller(size_t size, gfp_t gfpflags,
 }
 #endif
 
-#ifdef CONFIG_SYSFS
+#if defined(CONFIG_SYSFS) && !defined(CONFIG_GRKERNSEC_PROC_ADD)
 static int count_inuse(struct page *page)
 {
 	return page->inuse;
@@ -4204,7 +4215,11 @@ static int list_locations(struct kmem_cache *s, char *buf,
 		len += sprintf(buf + len, "%7ld ", l->count);
 
 		if (l->addr)
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+			len += sprintf(buf + len, "%pS", NULL);
+#else
 			len += sprintf(buf + len, "%pS", (void *)l->addr);
+#endif
 		else
 			len += sprintf(buf + len, "<not-available>");
 
@@ -4302,12 +4317,12 @@ static void __init resiliency_test(void)
 	validate_slab_cache(kmalloc_caches[9]);
 }
 #else
-#ifdef CONFIG_SYSFS
+#if defined(CONFIG_SYSFS) && !defined(CONFIG_GRKERNSEC_PROC_ADD)
 static void resiliency_test(void) {};
 #endif
 #endif
 
-#ifdef CONFIG_SYSFS
+#if defined(CONFIG_SYSFS) && !defined(CONFIG_GRKERNSEC_PROC_ADD)
 enum slab_stat_type {
 	SL_ALL,			/* All slabs */
 	SL_PARTIAL,		/* Only partially allocated slabs */
@@ -4544,7 +4559,11 @@ static ssize_t ctor_show(struct kmem_cache *s, char *buf)
 {
 	if (!s->ctor)
 		return 0;
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+	return sprintf(buf, "%pS\n", NULL);
+#else
 	return sprintf(buf, "%pS\n", s->ctor);
+#endif
 }
 SLAB_ATTR_RO(ctor);
 
@@ -5243,6 +5262,7 @@ static char *create_unique_id(struct kmem_cache *s)
 	return name;
 }
 
+#if defined(CONFIG_SYSFS) && !defined(CONFIG_GRKERNSEC_PROC_ADD)
 static int sysfs_slab_add(struct kmem_cache *s)
 {
 	int err;
@@ -5316,6 +5336,7 @@ void sysfs_slab_remove(struct kmem_cache *s)
 	kobject_del(&s->kobj);
 	kobject_put(&s->kobj);
 }
+#endif
 
 /*
  * Need to buffer aliases during bootup until sysfs becomes
@@ -5329,6 +5350,7 @@ struct saved_alias {
 
 static struct saved_alias *alias_list;
 
+#if defined(CONFIG_SYSFS) && !defined(CONFIG_GRKERNSEC_PROC_ADD)
 static int sysfs_slab_alias(struct kmem_cache *s, const char *name)
 {
 	struct saved_alias *al;
@@ -5351,6 +5373,7 @@ static int sysfs_slab_alias(struct kmem_cache *s, const char *name)
 	alias_list = al;
 	return 0;
 }
+#endif
 
 static int __init slab_sysfs_init(void)
 {

@@ -113,7 +113,7 @@ build_mmio_write(writeq, "q", unsigned long, "r", :"memory")
  *	this function
  */
 
-static inline phys_addr_t virt_to_phys(volatile void *address)
+static inline phys_addr_t __intentional_overflow(-1) virt_to_phys(volatile void *address)
 {
 	return __pa(address);
 }

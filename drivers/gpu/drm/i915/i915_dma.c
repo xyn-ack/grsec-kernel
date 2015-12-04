@@ -162,6 +162,8 @@ static int i915_getparam(struct drm_device *dev, void *data,
 		value = INTEL_INFO(dev)->eu_total;
 		if (!value)
 			return -ENODEV;
+	case I915_PARAM_HAS_LEGACY_CONTEXT:
+		value = drm_core_check_feature(dev, DRIVER_KMS_LEGACY_CONTEXT);
 		break;
 	default:
 		DRM_DEBUG("Unknown parameter %d\n", param->param);

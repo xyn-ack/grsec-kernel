@@ -419,7 +419,7 @@ ENTRY(pax_erase_kstack)
 
 	GET_THREAD_INFO(%r11)
 	mov TI_lowest_stack(%r11), %rdi
-	mov $0xB4DD00D5BADBABE5, %rax
+	mov $-0xBEEF, %rax
 	std
 
 1:	mov %edi, %ecx

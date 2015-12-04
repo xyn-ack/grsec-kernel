@@ -2838,7 +2838,7 @@ static int xgbe_init(struct xgbe_prv_data *pdata)
 	return 0;
 }
 
-const struct xgbe_hw_if default_xgbe_hw_if = {
+struct xgbe_hw_if default_xgbe_hw_if = {
 	.tx_complete = xgbe_tx_complete,
 
 	.set_mac_address = xgbe_set_mac_address,

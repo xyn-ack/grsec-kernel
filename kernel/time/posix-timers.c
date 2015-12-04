@@ -43,6 +43,7 @@
 #include <linux/hash.h>
 #include <linux/posix-clock.h>
 #include <linux/posix-timers.h>
+#include <linux/grsecurity.h>
 #include <linux/syscalls.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
@@ -1013,6 +1014,13 @@ SYSCALL_DEFINE2(clock_settime, const clockid_t, which_clock,
 
 	if (copy_from_user(&new_tp, tp, sizeof (*tp)))
 		return -EFAULT;
+
+	/* only the CLOCK_REALTIME clock can be set, all other clocks
+	   have their clock_set fptr set to a nosettime dummy function
+	   CLOCK_REALTIME has a NULL clock_set fptr which causes it to
+	   call common_clock_set, which calls do_sys_settimeofday, which
+	   we hook
+	*/
 
 	return kc->clock_set(which_clock, &new_tp);
 }

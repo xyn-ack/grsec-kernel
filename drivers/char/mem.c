@@ -18,6 +18,7 @@
 #include <linux/raw.h>
 #include <linux/tty.h>
 #include <linux/capability.h>
+#include <linux/security.h>
 #include <linux/ptrace.h>
 #include <linux/device.h>
 #include <linux/highmem.h>
@@ -35,6 +36,10 @@
 #endif
 
 #define DEVPORT_MINOR	4
+
+#if defined(CONFIG_GRKERNSEC) && !defined(CONFIG_GRKERNSEC_NO_RBAC)
+extern const struct file_operations grsec_fops;
+#endif
 
 static inline unsigned long size_inside_page(unsigned long start,
 					     unsigned long size)
@@ -67,15 +72,24 @@ static inline int range_is_allowed(unsigned long pfn, unsigned long size)
 
 	while (cursor < to) {
 		if (!devmem_is_allowed(pfn)) {
+#ifdef CONFIG_GRKERNSEC_KMEM
+			gr_handle_mem_readwrite(from, to);
+#else
 			printk(KERN_INFO
 		"Program %s tried to access /dev/mem between %Lx->%Lx.\n",
 				current->comm, from, to);
+#endif
 			return 0;
 		}
 		cursor += PAGE_SIZE;
 		pfn++;
 	}
 	return 1;
+}
+#elif defined(CONFIG_GRKERNSEC_KMEM)
+static inline int range_is_allowed(unsigned long pfn, unsigned long size)
+{
+	return 0;
 }
 #else
 static inline int range_is_allowed(unsigned long pfn, unsigned long size)
@@ -836,6 +850,9 @@ static const struct memdev {
 	 [9] = { "urandom", 0666, &urandom_fops, 0 },
 #ifdef CONFIG_PRINTK
 	[11] = { "kmsg", 0644, &kmsg_fops, 0 },
+#endif
+#if defined(CONFIG_GRKERNSEC) && !defined(CONFIG_GRKERNSEC_NO_RBAC)
+	[13] = { "grsec",S_IRUSR | S_IWUGO, &grsec_fops, 0 },
 #endif
 };
 

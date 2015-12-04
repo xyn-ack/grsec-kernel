@@ -16,6 +16,7 @@
 #include <linux/string.h>
 #include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/security.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
@@ -58,6 +59,8 @@ static int aout_core_dump(struct coredump_params *cprm)
 #endif
 #       define START_STACK(u)   ((void __user *)u.start_stack)
 
+	memset(&dump, 0, sizeof(dump));
+
 	fs = get_fs();
 	set_fs(KERNEL_DS);
 	has_dumped = 1;
@@ -68,10 +71,12 @@ static int aout_core_dump(struct coredump_params *cprm)
 
 /* If the size of the dump file exceeds the rlimit, then see what would happen
    if we wrote the stack, but not the data area.  */
+	gr_learn_resource(current, RLIMIT_CORE, (dump.u_dsize + dump.u_ssize+1) * PAGE_SIZE, 1);
 	if ((dump.u_dsize + dump.u_ssize+1) * PAGE_SIZE > cprm->limit)
 		dump.u_dsize = 0;
 
 /* Make sure we have enough room to write the stack and data areas. */
+	gr_learn_resource(current, RLIMIT_CORE, (dump.u_ssize + 1) * PAGE_SIZE, 1);
 	if ((dump.u_ssize + 1) * PAGE_SIZE > cprm->limit)
 		dump.u_ssize = 0;
 
@@ -232,6 +237,8 @@ static int load_aout_binary(struct linux_binprm * bprm)
 	rlim = rlimit(RLIMIT_DATA);
 	if (rlim >= RLIM_INFINITY)
 		rlim = ~0;
+
+	gr_learn_resource(current, RLIMIT_DATA, ex.a_data + ex.a_bss, 1);
 	if (ex.a_data + ex.a_bss > rlim)
 		return -ENOMEM;
 

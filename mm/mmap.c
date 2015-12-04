@@ -41,6 +41,7 @@
 #include <linux/notifier.h>
 #include <linux/memory.h>
 #include <linux/printk.h>
+#include <linux/random.h>
 
 #include <asm/uaccess.h>
 #include <asm/cacheflush.h>
@@ -305,6 +306,7 @@ static unsigned long do_brk(unsigned long addr, unsigned long len);
 
 SYSCALL_DEFINE1(brk, unsigned long, brk)
 {
+	unsigned long rlim;
 	unsigned long retval;
 	unsigned long newbrk, oldbrk;
 	struct mm_struct *mm = current->mm;
@@ -335,7 +337,13 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	 * segment grow beyond its set limit the in case where the limit is
 	 * not page aligned -Ram Gupta
 	 */
-	if (check_data_rlimit(rlimit(RLIMIT_DATA), brk, mm->start_brk,
+	rlim = rlimit(RLIMIT_DATA);
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+	/* force a minimum 16MB brk heap on setuid/setgid binaries */
+	if (rlim < PAGE_SIZE && (get_dumpable(mm) != SUID_DUMP_USER) && gr_is_global_nonroot(current_uid()))
+		rlim = 4096 * PAGE_SIZE;
+#endif
+	if (check_data_rlimit(rlim, brk, mm->start_brk,
 			      mm->end_data, mm->start_data))
 		goto out;
 
@@ -1319,6 +1327,7 @@ static inline int mlock_future_check(struct mm_struct *mm,
 		locked += mm->locked_vm;
 		lock_limit = rlimit(RLIMIT_MEMLOCK);
 		lock_limit >>= PAGE_SHIFT;
+		gr_learn_resource(current, RLIMIT_MEMLOCK, locked << PAGE_SHIFT, 1);
 		if (locked > lock_limit && !capable(CAP_IPC_LOCK))
 			return -EAGAIN;
 	}
@@ -1384,7 +1393,16 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 
 #ifdef CONFIG_PAX_MPROTECT
 	if (mm->pax_flags & MF_PAX_MPROTECT) {
-		if ((vm_flags & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC))
+
+#ifdef CONFIG_GRKERNSEC_RWXMAP_LOG
+		if (file && !pgoff && (vm_flags & VM_EXEC) && mm->binfmt &&
+		    mm->binfmt->handle_mmap)
+			mm->binfmt->handle_mmap(file);
+#endif
+
+#ifndef CONFIG_PAX_MPROTECT_COMPAT
+		if ((vm_flags & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC)) {
+			gr_log_rwxmmap(file);
 
 #ifdef CONFIG_PAX_EMUPLT
 			vm_flags &= ~VM_EXEC;
@@ -1392,8 +1410,14 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 			return -EPERM;
 #endif
 
+		}
+
 		if (!(vm_flags & VM_EXEC))
 			vm_flags &= ~VM_MAYEXEC;
+#else
+		if ((vm_flags & (VM_WRITE | VM_EXEC)) != VM_EXEC)
+			vm_flags &= ~(VM_EXEC | VM_MAYEXEC);
+#endif
 		else
 			vm_flags &= ~VM_MAYWRITE;
 	}
@@ -1491,6 +1515,9 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 			vm_flags |= VM_NORESERVE;
 	}
 
+	if (!gr_acl_handle_mmap(file, prot))
+		return -EACCES;
+	
 	addr = mmap_region(file, addr, len, vm_flags, pgoff);
 	if (!IS_ERR_VALUE(addr) &&
 	    ((vm_flags & VM_LOCKED) ||
@@ -1839,7 +1866,17 @@ unacct_error:
 	return error;
 }
 
-bool check_heap_stack_gap(const struct vm_area_struct *vma, unsigned long addr, unsigned long len)
+#ifdef CONFIG_GRKERNSEC_RAND_THREADSTACK
+unsigned long gr_rand_threadstack_offset(const struct mm_struct *mm, const struct file *filp, unsigned long flags)
+{
+	if ((mm->pax_flags & MF_PAX_RANDMMAP) && !filp && (flags & MAP_STACK))
+		return ((prandom_u32() & 0xFF) + 1) << PAGE_SHIFT;
+
+	return 0;
+}
+#endif
+
+bool check_heap_stack_gap(const struct vm_area_struct *vma, unsigned long addr, unsigned long len, unsigned long offset)
 {
 	if (!vma) {
 #ifdef CONFIG_STACK_GROWSUP
@@ -1862,16 +1899,24 @@ bool check_heap_stack_gap(const struct vm_area_struct *vma, unsigned long addr, 
 	else if (vma->vm_prev && (vma->vm_prev->vm_flags & VM_GROWSUP))
 		return addr - vma->vm_prev->vm_end >= sysctl_heap_stack_gap;
 #endif
+	else if (offset)
+		return offset <= vma->vm_start - addr - len;
 
 	return true;
 }
 
-unsigned long skip_heap_stack_gap(const struct vm_area_struct *vma, unsigned long len)
+unsigned long skip_heap_stack_gap(const struct vm_area_struct *vma, unsigned long len, unsigned long offset)
 {
 	if (vma->vm_start < len)
 		return -ENOMEM;
-	if (!(vma->vm_flags & VM_GROWSDOWN))
-		return vma->vm_start - len;
+
+	if (!(vma->vm_flags & VM_GROWSDOWN)) {
+		if (offset <= vma->vm_start - len)
+			return vma->vm_start - len - offset;
+		else
+			return -ENOMEM;
+	}
+
 	if (sysctl_heap_stack_gap <= vma->vm_start - len)
 		return vma->vm_start - len - sysctl_heap_stack_gap;
 	return -ENOMEM;
@@ -1925,11 +1970,17 @@ unsigned long unmapped_area(const struct vm_unmapped_area_info *info)
 			}
 		}
 
-		gap_start = vma->vm_prev ? vma->vm_prev->vm_end : 0;
+		gap_start = vma->vm_prev ? vma->vm_prev->vm_end: 0;
 check_current:
 		/* Check if current node has a suitable gap */
 		if (gap_start > high_limit)
 			return -ENOMEM;
+
+		if (gap_end - gap_start > info->threadstack_offset)
+			gap_start += info->threadstack_offset;
+		else
+			gap_start = gap_end;
+
 		if (vma->vm_prev && (vma->vm_prev->vm_flags & VM_GROWSUP)) {
 			if (gap_end - gap_start > sysctl_heap_stack_gap)
 				gap_start += sysctl_heap_stack_gap;
@@ -2045,6 +2096,12 @@ check_current:
 		gap_end = vma->vm_start;
 		if (gap_end < low_limit)
 			return -ENOMEM;
+
+		if (gap_end - gap_start > info->threadstack_offset)
+			gap_end -= info->threadstack_offset;
+		else
+			gap_end = gap_start;
+
 		if (vma->vm_prev && (vma->vm_prev->vm_flags & VM_GROWSUP)) {
 			if (gap_end - gap_start > sysctl_heap_stack_gap)
 				gap_start += sysctl_heap_stack_gap;
@@ -2120,6 +2177,7 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
 	struct vm_unmapped_area_info info;
+	unsigned long offset = gr_rand_threadstack_offset(mm, filp, flags);
 
 	if (len > TASK_SIZE - mmap_min_addr)
 		return -ENOMEM;
@@ -2135,7 +2193,7 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 		addr = PAGE_ALIGN(addr);
 		vma = find_vma(mm, addr);
 		if (TASK_SIZE - len >= addr && addr >= mmap_min_addr &&
-		    check_heap_stack_gap(vma, addr, len))
+		    check_heap_stack_gap(vma, addr, len, offset))
 			return addr;
 	}
 
@@ -2144,6 +2202,7 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	info.low_limit = mm->mmap_base;
 	info.high_limit = TASK_SIZE;
 	info.align_mask = 0;
+	info.threadstack_offset = offset;
 	return vm_unmapped_area(&info);
 }
 #endif
@@ -2162,6 +2221,7 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 	struct mm_struct *mm = current->mm;
 	unsigned long addr = addr0;
 	struct vm_unmapped_area_info info;
+	unsigned long offset = gr_rand_threadstack_offset(mm, filp, flags);
 
 	/* requested length too big for entire address space */
 	if (len > TASK_SIZE - mmap_min_addr)
@@ -2179,7 +2239,7 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 		addr = PAGE_ALIGN(addr);
 		vma = find_vma(mm, addr);
 		if (TASK_SIZE - len >= addr && addr >= mmap_min_addr &&
-				check_heap_stack_gap(vma, addr, len))
+				check_heap_stack_gap(vma, addr, len, offset))
 			return addr;
 	}
 
@@ -2188,6 +2248,7 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 	info.low_limit = max(PAGE_SIZE, mmap_min_addr);
 	info.high_limit = mm->mmap_base;
 	info.align_mask = 0;
+	info.threadstack_offset = offset;
 	addr = vm_unmapped_area(&info);
 
 	/*
@@ -2345,6 +2406,7 @@ static int acct_stack_growth(struct vm_area_struct *vma, unsigned long size, uns
 
 	/* Stack limit test */
 	actual_size = size;
+	gr_learn_resource(current, RLIMIT_STACK, actual_size, 1);
 	if (actual_size > READ_ONCE(rlim[RLIMIT_STACK].rlim_cur))
 		return -ENOMEM;
 
@@ -2355,6 +2417,7 @@ static int acct_stack_growth(struct vm_area_struct *vma, unsigned long size, uns
 		locked = mm->locked_vm + grow;
 		limit = READ_ONCE(rlim[RLIMIT_MEMLOCK].rlim_cur);
 		limit >>= PAGE_SHIFT;
+		gr_learn_resource(current, RLIMIT_MEMLOCK, locked << PAGE_SHIFT, 1);
 		if (locked > limit && !capable(CAP_IPC_LOCK))
 			return -ENOMEM;
 	}
@@ -2384,6 +2447,9 @@ static int acct_stack_growth(struct vm_area_struct *vma, unsigned long size, uns
  * PA-RISC uses this for its stack; IA64 for its Register Backing Store.
  * vma is the last one with address > vma->vm_end.  Have to extend vma.
  */
+#ifndef CONFIG_IA64
+static
+#endif
 int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 {
 	int error;
@@ -3293,6 +3359,9 @@ int insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma)
 	struct vm_area_struct *vma_m = NULL;
 #endif
 
+	if (security_mmap_addr(vma->vm_start))
+		return -EPERM;
+
 	/*
 	 * The vm_pgoff of a purely anonymous vma should be irrelevant
 	 * until its first write fault, when page's anon_vma and index
@@ -3459,6 +3528,7 @@ int may_expand_vm(struct mm_struct *mm, unsigned long npages)
 
 	lim = rlimit(RLIMIT_AS) >> PAGE_SHIFT;
 
+	gr_learn_resource(current, RLIMIT_AS, (cur + npages) << PAGE_SHIFT, 1);
 	if (cur + npages > lim)
 		return 0;
 	return 1;
@@ -3543,10 +3613,15 @@ static struct vm_area_struct *__install_special_mapping(
 
 #ifdef CONFIG_PAX_MPROTECT
 	if (mm->pax_flags & MF_PAX_MPROTECT) {
+#ifndef CONFIG_PAX_MPROTECT_COMPAT
 		if ((vm_flags & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC))
 			return ERR_PTR(-EPERM);
 		if (!(vm_flags & VM_EXEC))
 			vm_flags &= ~VM_MAYEXEC;
+#else
+		if ((vm_flags & (VM_WRITE | VM_EXEC)) != VM_EXEC)
+			vm_flags &= ~(VM_EXEC | VM_MAYEXEC);
+#endif
 		else
 			vm_flags &= ~VM_MAYWRITE;
 	}

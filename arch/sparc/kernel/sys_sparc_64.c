@@ -89,6 +89,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 	struct vm_area_struct * vma;
 	unsigned long task_size = TASK_SIZE;
 	int do_color_align;
+	unsigned long offset = gr_rand_threadstack_offset(mm, filp, flags);
 	struct vm_unmapped_area_info info;
 
 	if (flags & MAP_FIXED) {
@@ -121,7 +122,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 			addr = PAGE_ALIGN(addr);
 
 		vma = find_vma(mm, addr);
-		if (task_size - len >= addr && check_heap_stack_gap(vma, addr, len))
+		if (task_size - len >= addr && check_heap_stack_gap(vma, addr, len, offset))
 			return addr;
 	}
 
@@ -131,6 +132,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 	info.high_limit = min(task_size, VA_EXCLUDE_START);
 	info.align_mask = do_color_align ? (PAGE_MASK & (SHMLBA - 1)) : 0;
 	info.align_offset = pgoff << PAGE_SHIFT;
+	info.threadstack_offset = offset;
 	addr = vm_unmapped_area(&info);
 
 	if ((addr & ~PAGE_MASK) && task_size > VA_EXCLUDE_END) {
@@ -159,6 +161,7 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 	unsigned long task_size = STACK_TOP32;
 	unsigned long addr = addr0;
 	int do_color_align;
+	unsigned long offset = gr_rand_threadstack_offset(mm, filp, flags);
 	struct vm_unmapped_area_info info;
 
 	/* This should only ever run for 32-bit processes.  */
@@ -193,7 +196,7 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 			addr = PAGE_ALIGN(addr);
 
 		vma = find_vma(mm, addr);
-		if (task_size - len >= addr && check_heap_stack_gap(vma, addr, len))
+		if (task_size - len >= addr && check_heap_stack_gap(vma, addr, len, offset))
 			return addr;
 	}
 
@@ -203,6 +206,7 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 	info.high_limit = mm->mmap_base;
 	info.align_mask = do_color_align ? (PAGE_MASK & (SHMLBA - 1)) : 0;
 	info.align_offset = pgoff << PAGE_SHIFT;
+	info.threadstack_offset = offset;
 	addr = vm_unmapped_area(&info);
 
 	/*

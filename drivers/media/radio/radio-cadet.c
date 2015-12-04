@@ -351,8 +351,9 @@ static ssize_t cadet_read(struct file *file, char __user *data, size_t count, lo
 		readbuf[i++] = dev->rdsbuf[dev->rdsout++];
 	mutex_unlock(&dev->lock);
 
-	if (i && copy_to_user(data, readbuf, i))
-		return -EFAULT;
+	if (i > sizeof(readbuf) || (i && copy_to_user(data, readbuf, i)))
+		i = -EFAULT;
+
 	return i;
 }
 

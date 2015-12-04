@@ -2276,6 +2276,7 @@ inline ssize_t generic_write_checks(struct kiocb *iocb, struct iov_iter *from)
 	pos = iocb->ki_pos;
 
 	if (limit != RLIM_INFINITY) {
+		gr_learn_resource(current, RLIMIT_FSIZE, iocb->ki_pos, 0);
 		if (iocb->ki_pos >= limit) {
 			send_sig(SIGXFSZ, current, 0);
 			return -EFBIG;

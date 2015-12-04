@@ -59,6 +59,7 @@
 #include <linux/jump_label.h>
 #include <linux/pfn.h>
 #include <linux/bsearch.h>
+#include <linux/grsecurity.h>
 #include <uapi/linux/module.h>
 #include "module-internal.h"
 
@@ -145,7 +146,7 @@ module_param(sig_enforce, bool_enable_only, 0644);
 #endif /* CONFIG_MODULE_SIG */
 
 /* Block module loading/unloading? */
-int modules_disabled = 0;
+int modules_disabled __read_only = 0;
 core_param(nomodule, modules_disabled, bint, 0);
 
 /* Waiting for a module to finish initializing? */
@@ -1159,12 +1160,29 @@ static int check_version(Elf_Shdr *sechdrs,
 		goto bad_version;
 	}
 
+#ifdef CONFIG_GRKERNSEC_RANDSTRUCT
+	/*
+	 * avoid potentially printing jibberish on attempted load
+	 * of a module randomized with a different seed
+	 */
+	pr_warn("no symbol version for %s\n", symname);
+#else
 	pr_warn("%s: no symbol version for %s\n", mod->name, symname);
+#endif
 	return 0;
 
 bad_version:
+#ifdef CONFIG_GRKERNSEC_RANDSTRUCT
+	/*
+	 * avoid potentially printing jibberish on attempted load
+	 * of a module randomized with a different seed
+	 */
+	pr_warn("attempted module disagrees about version of symbol %s\n",
+	       symname);
+#else
 	pr_warn("%s: disagrees about version of symbol %s\n",
 	       mod->name, symname);
+#endif
 	return 0;
 }
 
@@ -1286,7 +1304,7 @@ resolve_symbol_wait(struct module *mod,
  */
 #ifdef CONFIG_SYSFS
 
-#ifdef CONFIG_KALLSYMS
+#if defined(CONFIG_KALLSYMS) && !defined(CONFIG_GRKERNSEC_HIDESYM)
 static inline bool sect_empty(const Elf_Shdr *sect)
 {
 	return !(sect->sh_flags & SHF_ALLOC) || sect->sh_size == 0;
@@ -1955,8 +1973,30 @@ static int simplify_symbols(struct module *mod, const struct load_info *info)
 	int ret = 0;
 	const struct kernel_symbol *ksym;
 
+#ifdef CONFIG_GRKERNSEC_MODHARDEN
+	int is_fs_load = 0;
+	int register_filesystem_found = 0;
+	char *p;
+
+	p = strstr(mod->args, "grsec_modharden_fs");
+	if (p) {
+		char *endptr = p + sizeof("grsec_modharden_fs") - 1;
+		/* copy \0 as well */
+		memmove(p, endptr, strlen(mod->args) - (unsigned int)(endptr - mod->args) + 1);
+		is_fs_load = 1;
+	}
+#endif
+
 	for (i = 1; i < symsec->sh_size / sizeof(Elf_Sym); i++) {
 		const char *name = info->strtab + sym[i].st_name;
+
+#ifdef CONFIG_GRKERNSEC_MODHARDEN
+		/* it's a real shame this will never get ripped and copied
+		   upstream! ;(
+		*/
+		if (is_fs_load && !strcmp(name, "register_filesystem"))
+			register_filesystem_found = 1;
+#endif
 
 		switch (sym[i].st_shndx) {
 		case SHN_COMMON:
@@ -2009,6 +2049,13 @@ static int simplify_symbols(struct module *mod, const struct load_info *info)
 			break;
 		}
 	}
+
+#ifdef CONFIG_GRKERNSEC_MODHARDEN
+	if (is_fs_load && !register_filesystem_found) {
+		printk(KERN_ALERT "grsec: Denied attempt to load non-fs module %.64s through mount\n", mod->name);
+		ret = -EPERM;
+	}
+#endif
 
 	return ret;
 }
@@ -2686,7 +2733,15 @@ static struct module *setup_load_info(struct load_info *info, int flags)
 	mod = (void *)info->sechdrs[info->index.mod].sh_addr;
 
 	if (info->index.sym == 0) {
+#ifdef CONFIG_GRKERNSEC_RANDSTRUCT
+		/*
+		 * avoid potentially printing jibberish on attempted load
+		 * of a module randomized with a different seed
+		 */
+		pr_warn("module has no symbols (stripped?)\n");
+#else
 		pr_warn("%s: module has no symbols (stripped?)\n", mod->name);
+#endif
 		return ERR_PTR(-ENOEXEC);
 	}
 
@@ -3399,8 +3454,37 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	if (err)
 		goto free_unload;
 
+	/* Now copy in args */
+	mod->args = strndup_user(uargs, ~0UL >> 1);
+	if (IS_ERR(mod->args)) {
+		err = PTR_ERR(mod->args);
+		goto free_unload;
+	}
+
 	/* Set up MODINFO_ATTR fields */
 	setup_modinfo(mod, info);
+
+#ifdef CONFIG_GRKERNSEC_MODHARDEN
+	{
+		char *p, *p2;
+
+		if (strstr(mod->args, "grsec_modharden_netdev")) {
+			printk(KERN_ALERT "grsec: denied auto-loading kernel module for a network device with CAP_SYS_MODULE (deprecated).  Use CAP_NET_ADMIN and alias netdev-%.64s instead.", mod->name);
+			err = -EPERM;
+			goto free_modinfo;
+		} else if ((p = strstr(mod->args, "grsec_modharden_normal"))) {
+			p += sizeof("grsec_modharden_normal") - 1;
+			p2 = strstr(p, "_");
+			if (p2) {
+				*p2 = '\0';
+				printk(KERN_ALERT "grsec: denied kernel module auto-load of %.64s by uid %.9s\n", mod->name, p);
+				*p2 = '_';
+			}
+			err = -EPERM;
+			goto free_modinfo;
+		}
+	}
+#endif
 
 	/* Fix up syms, so that st_value is a pointer to location. */
 	err = simplify_symbols(mod, info);
@@ -3416,13 +3500,6 @@ static int load_module(struct load_info *info, const char __user *uargs,
 		goto free_modinfo;
 
 	flush_module_icache(mod);
-
-	/* Now copy in args */
-	mod->args = strndup_user(uargs, ~0UL >> 1);
-	if (IS_ERR(mod->args)) {
-		err = PTR_ERR(mod->args);
-		goto free_arch_cleanup;
-	}
 
 	dynamic_debug_setup(info->debug, info->num_debug);
 
@@ -3474,11 +3551,10 @@ static int load_module(struct load_info *info, const char __user *uargs,
  ddebug_cleanup:
 	dynamic_debug_remove(info->debug);
 	synchronize_sched();
-	kfree(mod->args);
- free_arch_cleanup:
 	module_arch_cleanup(mod);
  free_modinfo:
 	free_modinfo(mod);
+	kfree(mod->args);
  free_unload:
 	module_unload_free(mod);
  unlink_mod:
@@ -3871,7 +3947,17 @@ static const struct file_operations proc_modules_operations = {
 
 static int __init proc_modules_init(void)
 {
+#ifndef CONFIG_GRKERNSEC_HIDESYM
+#ifdef CONFIG_GRKERNSEC_PROC_USER
+	proc_create("modules", S_IRUSR, NULL, &proc_modules_operations);
+#elif defined(CONFIG_GRKERNSEC_PROC_USERGROUP)
+	proc_create("modules", S_IRUSR | S_IRGRP, NULL, &proc_modules_operations);
+#else
 	proc_create("modules", 0, NULL, &proc_modules_operations);
+#endif
+#else
+	proc_create("modules", S_IRUSR, NULL, &proc_modules_operations);
+#endif
 	return 0;
 }
 module_init(proc_modules_init);

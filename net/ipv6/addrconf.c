@@ -178,7 +178,7 @@ static struct ipv6_devconf ipv6_devconf __read_mostly = {
 	.hop_limit		= IPV6_DEFAULT_HOPLIMIT,
 	.mtu6			= IPV6_MIN_MTU,
 	.accept_ra		= 1,
-	.accept_redirects	= 1,
+	.accept_redirects	= 0,
 	.autoconf		= 1,
 	.force_mld_version	= 0,
 	.mldv1_unsolicited_report_interval = 10 * HZ,
@@ -219,7 +219,7 @@ static struct ipv6_devconf ipv6_devconf_dflt __read_mostly = {
 	.hop_limit		= IPV6_DEFAULT_HOPLIMIT,
 	.mtu6			= IPV6_MIN_MTU,
 	.accept_ra		= 1,
-	.accept_redirects	= 1,
+	.accept_redirects	= 0,
 	.autoconf		= 1,
 	.force_mld_version	= 0,
 	.mldv1_unsolicited_report_interval = 10 * HZ,
@@ -3772,16 +3772,23 @@ static const struct file_operations if6_fops = {
 	.release	= seq_release_net,
 };
 
+extern void register_ipv6_seq_ops_addr(struct seq_operations *addr);
+extern void unregister_ipv6_seq_ops_addr(void);
+
 static int __net_init if6_proc_net_init(struct net *net)
 {
-	if (!proc_create("if_inet6", S_IRUGO, net->proc_net, &if6_fops))
+	register_ipv6_seq_ops_addr(&if6_seq_ops);
+	if (!proc_create("if_inet6", S_IRUGO, net->proc_net, &if6_fops)) {
+		unregister_ipv6_seq_ops_addr();
 		return -ENOMEM;
+	}
 	return 0;
 }
 
 static void __net_exit if6_proc_net_exit(struct net *net)
 {
 	remove_proc_entry("if_inet6", net->proc_net);
+	unregister_ipv6_seq_ops_addr();
 }
 
 static struct pernet_operations if6_proc_net_ops = {

@@ -446,6 +446,20 @@ static int putreg(struct task_struct *child,
 		if (child->thread.gs != value)
 			return do_arch_prctl(child, ARCH_SET_GS, value);
 		return 0;
+
+	case offsetof(struct user_regs_struct,ip):
+		/*
+		 * Protect against any attempt to set ip to an
+		 * impossible address.  There are dragons lurking if the
+		 * address is noncanonical.  (This explicitly allows
+		 * setting ip to TASK_SIZE_MAX, because user code can do
+		 * that all by itself by running off the end of its
+		 * address space.
+		 */
+		if (value > TASK_SIZE_MAX)
+			return -EIO;
+		break;
+
 #endif
 	}
 
@@ -1449,6 +1463,10 @@ static void do_audit_syscall_entry(struct pt_regs *regs, u32 arch)
 	}
 }
 
+#ifdef CONFIG_GRKERNSEC_SETXID
+extern void gr_delayed_cred_worker(void);
+#endif
+
 /*
  * We can return 0 to resume the syscall or anything else to go to phase
  * 2.  If we resume the syscall, we need to put something appropriate in
@@ -1556,6 +1574,11 @@ long syscall_trace_enter_phase2(struct pt_regs *regs, u32 arch,
 
 	BUG_ON(regs != task_pt_regs(current));
 
+#ifdef CONFIG_GRKERNSEC_SETXID
+	if (unlikely(test_and_clear_thread_flag(TIF_GRSEC_SETXID)))
+		gr_delayed_cred_worker();
+#endif
+
 	/*
 	 * If we stepped into a sysenter/syscall insn, it trapped in
 	 * kernel mode; do_debug() cleared TF and set TIF_SINGLESTEP.
@@ -1613,6 +1636,11 @@ void syscall_trace_leave(struct pt_regs *regs)
 	 * user mode.
 	 */
 	user_exit();
+
+#ifdef CONFIG_GRKERNSEC_SETXID
+	if (unlikely(test_and_clear_thread_flag(TIF_GRSEC_SETXID)))
+		gr_delayed_cred_worker();
+#endif
 
 	audit_syscall_exit(regs);
 

@@ -27,6 +27,7 @@
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/string.h>
+#include <linux/grsecurity.h>
 
 struct linux_binprm;
 struct cred;
@@ -1753,7 +1754,7 @@ struct security_operations {
 				 struct audit_context *actx);
 	void (*audit_rule_free) (void *lsmrule);
 #endif /* CONFIG_AUDIT */
-};
+} __randomize_layout;
 
 /* prototypes */
 extern int security_init(void);

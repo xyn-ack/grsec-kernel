@@ -487,7 +487,7 @@ static void do_kmem_cache_release(struct list_head *release,
 		rcu_barrier();
 
 	list_for_each_entry_safe(s, s2, release, list) {
-#ifdef SLAB_SUPPORTS_SYSFS
+#if defined(SLAB_SUPPORTS_SYSFS) && !defined(CONFIG_GRKERNSEC_PROC_ADD)
 		sysfs_slab_remove(s);
 #else
 		slab_kmem_cache_release(s);

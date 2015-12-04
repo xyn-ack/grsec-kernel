@@ -1047,7 +1047,7 @@ struct proto {
 	void			(*destroy_cgroup)(struct mem_cgroup *memcg);
 	struct cg_proto		*(*proto_cgroup)(struct mem_cgroup *memcg);
 #endif
-};
+} __randomize_layout;
 
 /*
  * Bits in struct cg_proto.flags

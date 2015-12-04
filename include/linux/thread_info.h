@@ -145,11 +145,11 @@ static inline bool test_and_clear_restore_sigmask(void)
 #error "no set_restore_sigmask() provided and default one won't work"
 #endif
 
-extern void __check_object_size(const void *ptr, unsigned long n, bool to_user);
+extern void __check_object_size(const void *ptr, unsigned long n, bool to_user, bool const_size);
+
 static inline void check_object_size(const void *ptr, unsigned long n, bool to_user)
 {
-	if (!__builtin_constant_p(n))
-		__check_object_size(ptr, n, to_user);
+	__check_object_size(ptr, n, to_user, __builtin_constant_p(n));
 }
 
 #endif	/* __KERNEL__ */

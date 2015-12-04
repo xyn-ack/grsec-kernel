@@ -285,7 +285,7 @@ static struct ctl_table net_core_table[] = {
 		.mode		= 0444,
 		.proc_handler	= proc_do_rss_key,
 	},
-#ifdef CONFIG_BPF_JIT
+#if defined(CONFIG_BPF_JIT) && !defined(CONFIG_GRKERNSEC_BPF_HARDEN)
 	{
 		.procname	= "bpf_jit_enable",
 		.data		= &bpf_jit_enable,

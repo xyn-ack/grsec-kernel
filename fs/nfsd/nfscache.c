@@ -557,7 +557,7 @@ nfsd_cache_update(struct svc_rqst *rqstp, int cachetype, __be32 *statp)
 	}
 
 	/* Don't cache excessive amounts of data and XDR failures */
-	if (!statp || len > (256 >> 2)) {
+	if (!statp || len > (256 >> 2) || len < 0) {
 		nfsd_reply_cache_free(b, rp);
 		return;
 	}

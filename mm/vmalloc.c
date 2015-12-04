@@ -42,6 +42,21 @@ struct vfree_deferred {
 static DEFINE_PER_CPU(struct vfree_deferred, vfree_deferred);
 static DEFINE_PER_CPU(struct vfree_deferred, vunmap_deferred);
 
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+struct stack_deferred_llist {
+	struct llist_head list;
+	void *stack;
+	void *lowmem_stack;
+};
+
+struct stack_deferred {
+	struct stack_deferred_llist list;
+	struct work_struct wq;
+};
+
+static DEFINE_PER_CPU(struct stack_deferred, stack_deferred);
+#endif
+
 static void __vunmap(const void *, int);
 
 static void vfree_work(struct work_struct *w)
@@ -49,9 +64,9 @@ static void vfree_work(struct work_struct *w)
 	struct vfree_deferred *p = container_of(w, struct vfree_deferred, wq);
 	struct llist_node *llnode = llist_del_all(&p->list);
 	while (llnode) {
-		void *p = llnode;
+		void *x = llnode;
 		llnode = llist_next(llnode);
-		__vunmap(p, 1);
+		__vunmap(x, 1);
 	}
 }
 
@@ -60,11 +75,29 @@ static void vunmap_work(struct work_struct *w)
 	struct vfree_deferred *p = container_of(w, struct vfree_deferred, wq);
 	struct llist_node *llnode = llist_del_all(&p->list);
 	while (llnode) {
-		void *p = llnode;
+		void *x = llnode;
 		llnode = llist_next(llnode);
-		__vunmap(p, 0);
+		__vunmap(x, 0);
 	}
 }
+
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+static void unmap_work(struct work_struct *w)
+{
+	struct stack_deferred *p = container_of(w, struct stack_deferred, wq);
+	struct llist_node *llnode = llist_del_all(&p->list.list);
+	while (llnode) {
+		struct stack_deferred_llist *x =
+			llist_entry((struct llist_head *)llnode,
+				     struct stack_deferred_llist, list);
+		void *stack = ACCESS_ONCE(x->stack);
+		void *lowmem_stack = ACCESS_ONCE(x->lowmem_stack);
+		llnode = llist_next(llnode);
+		__vunmap(stack, 0);
+		free_kmem_pages((unsigned long)lowmem_stack, THREAD_SIZE_ORDER);
+	}
+}
+#endif
 
 /*** Page table manipulation functions ***/
 
@@ -1245,6 +1278,9 @@ void __init vmalloc_init(void)
 	for_each_possible_cpu(i) {
 		struct vmap_block_queue *vbq;
 		struct vfree_deferred *p;
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+		struct stack_deferred *p2;
+#endif
 
 		vbq = &per_cpu(vmap_block_queue, i);
 		spin_lock_init(&vbq->lock);
@@ -1257,6 +1293,12 @@ void __init vmalloc_init(void)
 		p = &per_cpu(vunmap_deferred, i);
 		init_llist_head(&p->list);
 		INIT_WORK(&p->wq, vunmap_work);
+
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+		p2 = &per_cpu(stack_deferred, i);
+		init_llist_head(&p2->list.list);
+		INIT_WORK(&p2->wq, unmap_work);
+#endif
 	}
 
 	/* Import existing vmlist entries. */
@@ -1591,7 +1633,6 @@ void vunmap(const void *addr)
 {
 	if (!addr)
 		return;
-
 	if (unlikely(in_interrupt())) {
 		struct vfree_deferred *p = this_cpu_ptr(&vunmap_deferred);
 		if (llist_add((struct llist_node *)addr, &p->list))
@@ -1602,6 +1643,23 @@ void vunmap(const void *addr)
 	}
 }
 EXPORT_SYMBOL(vunmap);
+
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+void unmap_process_stacks(struct task_struct *task)
+{
+	if (unlikely(in_interrupt())) {
+		struct stack_deferred *p = this_cpu_ptr(&stack_deferred);
+		struct stack_deferred_llist *list = task->stack;
+		list->stack = task->stack;
+		list->lowmem_stack = task->lowmem_stack;
+		if (llist_add((struct llist_node *)&list->list, &p->list.list))
+			schedule_work(&p->wq);
+	} else {
+		__vunmap(task->stack, 0);
+		free_kmem_pages((unsigned long)task->lowmem_stack, THREAD_SIZE_ORDER);
+	}
+}
+#endif
 
 /**
  *	vmap  -  map an array of pages into virtually contiguous space
@@ -1791,6 +1849,14 @@ static void *__vmalloc_node(unsigned long size, unsigned long align,
 {
 	return __vmalloc_node_range(size, align, VMALLOC_START, VMALLOC_END,
 				gfp_mask, prot, 0, node, caller);
+}
+
+void *vmalloc_usercopy(unsigned long size)
+{
+	return __vmalloc_node_range(size, 1, VMALLOC_START, VMALLOC_END,
+				    GFP_KERNEL | __GFP_HIGHMEM, PAGE_KERNEL,
+				    VM_USERCOPY, NUMA_NO_NODE,
+				    __builtin_return_address(0));
 }
 
 void *__vmalloc(unsigned long size, gfp_t gfp_mask, pgprot_t prot)
@@ -2709,7 +2775,11 @@ static int s_show(struct seq_file *m, void *p)
 		v->addr, v->addr + v->size, v->size);
 
 	if (v->caller)
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+		seq_printf(m, " %pK", v->caller);
+#else
 		seq_printf(m, " %pS", v->caller);
+#endif
 
 	if (v->nr_pages)
 		seq_printf(m, " pages=%d", v->nr_pages);

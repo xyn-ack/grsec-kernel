@@ -512,6 +512,8 @@ void do_coredump(const siginfo_t *siginfo)
 	bool need_suid_safe = false;
 	bool core_dumped = false;
 	static atomic_unchecked_t core_dump_count = ATOMIC_INIT(0);
+	long signr = siginfo->si_signo;
+	int dumpable;
 	struct coredump_params cprm = {
 		.siginfo = siginfo,
 		.regs = signal_pt_regs(),
@@ -524,12 +526,17 @@ void do_coredump(const siginfo_t *siginfo)
 		.mm_flags = mm->flags,
 	};
 
-	audit_core_dumps(siginfo->si_signo);
+	audit_core_dumps(signr);
+
+	dumpable = __get_dumpable(cprm.mm_flags);
+
+	if (signr == SIGSEGV || signr == SIGBUS || signr == SIGKILL || signr == SIGILL)
+		gr_handle_brute_attach(dumpable);
 
 	binfmt = mm->binfmt;
 	if (!binfmt || !binfmt->core_dump)
 		goto fail;
-	if (!__get_dumpable(cprm.mm_flags))
+	if (!dumpable)
 		goto fail;
 
 	cred = prepare_creds();
@@ -547,7 +554,7 @@ void do_coredump(const siginfo_t *siginfo)
 		need_suid_safe = true;
 	}
 
-	retval = coredump_wait(siginfo->si_signo, &core_state);
+	retval = coredump_wait(signr, &core_state);
 	if (retval < 0)
 		goto fail_creds;
 
@@ -621,6 +628,8 @@ void do_coredump(const siginfo_t *siginfo)
 		}
 	} else {
 		struct inode *inode;
+
+		gr_learn_resource(current, RLIMIT_CORE, binfmt->min_coredump, 1);
 
 		if (cprm.limit < binfmt->min_coredump)
 			goto fail_unlock;
@@ -732,6 +741,8 @@ int dump_emit(struct coredump_params *cprm, const void *addr, int nr)
 	struct file *file = cprm->file;
 	loff_t pos = file->f_pos;
 	ssize_t n;
+
+	gr_learn_resource(current, RLIMIT_CORE, cprm->written + nr, 1);
 	if (cprm->written + nr > cprm->limit)
 		return 0;
 	while (nr) {

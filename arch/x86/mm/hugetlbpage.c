@@ -74,23 +74,24 @@ int pud_huge(pud_t pud)
 #ifdef CONFIG_HUGETLB_PAGE
 static unsigned long hugetlb_get_unmapped_area_bottomup(struct file *file,
 		unsigned long addr, unsigned long len,
-		unsigned long pgoff, unsigned long flags)
+		unsigned long pgoff, unsigned long flags, unsigned long offset)
 {
 	struct hstate *h = hstate_file(file);
 	struct vm_unmapped_area_info info;
-
+	
 	info.flags = 0;
 	info.length = len;
 	info.low_limit = current->mm->mmap_legacy_base;
 	info.high_limit = TASK_SIZE;
 	info.align_mask = PAGE_MASK & ~huge_page_mask(h);
 	info.align_offset = 0;
+	info.threadstack_offset = offset;
 	return vm_unmapped_area(&info);
 }
 
 static unsigned long hugetlb_get_unmapped_area_topdown(struct file *file,
 		unsigned long addr0, unsigned long len,
-		unsigned long pgoff, unsigned long flags)
+		unsigned long pgoff, unsigned long flags, unsigned long offset)
 {
 	struct hstate *h = hstate_file(file);
 	struct vm_unmapped_area_info info;
@@ -102,6 +103,7 @@ static unsigned long hugetlb_get_unmapped_area_topdown(struct file *file,
 	info.high_limit = current->mm->mmap_base;
 	info.align_mask = PAGE_MASK & ~huge_page_mask(h);
 	info.align_offset = 0;
+	info.threadstack_offset = offset;
 	addr = vm_unmapped_area(&info);
 
 	/*
@@ -135,6 +137,7 @@ hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
 	unsigned long pax_task_size = TASK_SIZE;
+	unsigned long offset = gr_rand_threadstack_offset(mm, file, flags);
 
 	if (len & ~huge_page_mask(h))
 		return -EINVAL;
@@ -162,15 +165,15 @@ hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 	if (addr) {
 		addr = ALIGN(addr, huge_page_size(h));
 		vma = find_vma(mm, addr);
-		if (pax_task_size - len >= addr && check_heap_stack_gap(vma, addr, len))
+		if (pax_task_size - len >= addr && check_heap_stack_gap(vma, addr, len, offset))
 			return addr;
 	}
 	if (mm->get_unmapped_area == arch_get_unmapped_area)
 		return hugetlb_get_unmapped_area_bottomup(file, addr, len,
-				pgoff, flags);
+				pgoff, flags, offset);
 	else
 		return hugetlb_get_unmapped_area_topdown(file, addr, len,
-				pgoff, flags);
+				pgoff, flags, offset);
 }
 #endif /* CONFIG_HUGETLB_PAGE */
 

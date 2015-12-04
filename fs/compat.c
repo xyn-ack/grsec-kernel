@@ -54,7 +54,7 @@
 #include <asm/ioctls.h>
 #include "internal.h"
 
-int compat_log = 1;
+int compat_log = 0;
 
 int compat_printk(const char *fmt, ...)
 {
@@ -844,6 +844,7 @@ struct compat_old_linux_dirent {
 struct compat_readdir_callback {
 	struct dir_context ctx;
 	struct compat_old_linux_dirent __user *dirent;
+	struct file * file;
 	int result;
 };
 
@@ -863,6 +864,10 @@ static int compat_fillonedir(struct dir_context *ctx, const char *name,
 		buf->result = -EOVERFLOW;
 		return -EOVERFLOW;
 	}
+
+	if (!gr_acl_handle_filldir(buf->file, name, namlen, ino))
+		return 0;
+
 	buf->result++;
 	dirent = buf->dirent;
 	if (!access_ok(VERIFY_WRITE, dirent,
@@ -894,6 +899,7 @@ COMPAT_SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
 	if (!f.file)
 		return -EBADF;
 
+	buf.file = f.file;
 	error = iterate_dir(f.file, &buf.ctx);
 	if (buf.result)
 		error = buf.result;
@@ -913,6 +919,7 @@ struct compat_getdents_callback {
 	struct dir_context ctx;
 	struct compat_linux_dirent __user *current_dir;
 	struct compat_linux_dirent __user *previous;
+	struct file * file;
 	int count;
 	int error;
 };
@@ -935,6 +942,10 @@ static int compat_filldir(struct dir_context *ctx, const char *name, int namlen,
 		buf->error = -EOVERFLOW;
 		return -EOVERFLOW;
 	}
+
+	if (!gr_acl_handle_filldir(buf->file, name, namlen, ino))
+		return 0;
+
 	dirent = buf->previous;
 	if (dirent) {
 		if (__put_user(offset, &dirent->d_off))
@@ -980,6 +991,7 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
 	if (!f.file)
 		return -EBADF;
 
+	buf.file = f.file;
 	error = iterate_dir(f.file, &buf.ctx);
 	if (error >= 0)
 		error = buf.error;
@@ -1000,6 +1012,7 @@ struct compat_getdents_callback64 {
 	struct dir_context ctx;
 	struct linux_dirent64 __user *current_dir;
 	struct linux_dirent64 __user *previous;
+	struct file * file;
 	int count;
 	int error;
 };
@@ -1018,6 +1031,10 @@ static int compat_filldir64(struct dir_context *ctx, const char *name,
 	buf->error = -EINVAL;	/* only used if we fail.. */
 	if (reclen > buf->count)
 		return -EINVAL;
+
+	if (!gr_acl_handle_filldir(buf->file, name, namlen, ino))
+		return 0;
+
 	dirent = buf->previous;
 
 	if (dirent) {
@@ -1067,6 +1084,7 @@ COMPAT_SYSCALL_DEFINE3(getdents64, unsigned int, fd,
 	if (!f.file)
 		return -EBADF;
 
+	buf.file = f.file;
 	error = iterate_dir(f.file, &buf.ctx);
 	if (error >= 0)
 		error = buf.error;

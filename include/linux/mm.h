@@ -1842,12 +1842,23 @@ extern struct vm_area_struct *copy_vma(struct vm_area_struct **,
 	bool *need_rmap_locks);
 extern void exit_mmap(struct mm_struct *);
 
+#if defined(CONFIG_GRKERNSEC) && (defined(CONFIG_GRKERNSEC_RESLOG) || !defined(CONFIG_GRKERNSEC_NO_RBAC))
+extern void gr_learn_resource(const struct task_struct *task, const int res,
+			      const unsigned long wanted, const int gt);
+#else
+static inline void gr_learn_resource(const struct task_struct *task, const int res,
+				     const unsigned long wanted, const int gt)
+{
+}
+#endif
+
 static inline int check_data_rlimit(unsigned long rlim,
 				    unsigned long new,
 				    unsigned long start,
 				    unsigned long end_data,
 				    unsigned long start_data)
 {
+	gr_learn_resource(current, RLIMIT_DATA, (new - start) + (end_data - start_data), 1);
 	if (rlim < RLIM_INFINITY) {
 		if (((new - start) + (end_data - start_data)) > rlim)
 			return -ENOSPC;
@@ -1909,6 +1920,7 @@ struct vm_unmapped_area_info {
 	unsigned long high_limit;
 	unsigned long align_mask;
 	unsigned long align_offset;
+	unsigned long threadstack_offset;
 };
 
 extern unsigned long unmapped_area(const struct vm_unmapped_area_info *info);

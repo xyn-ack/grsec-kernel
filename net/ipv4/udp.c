@@ -87,6 +87,7 @@
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/module.h>
+#include <linux/security.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/igmp.h>
@@ -114,6 +115,10 @@
 #include <trace/events/skb.h>
 #include <net/busy_poll.h>
 #include "udp_impl.h"
+
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+extern int grsec_enable_blackhole;
+#endif
 
 struct udp_table udp_table __read_mostly;
 EXPORT_SYMBOL(udp_table);
@@ -608,6 +613,9 @@ static inline bool __udp_is_mcast_sock(struct net *net, struct sock *sk,
 	return true;
 }
 
+extern int gr_search_udp_recvmsg(struct sock *sk, const struct sk_buff *skb);
+extern int gr_search_udp_sendmsg(struct sock *sk, struct sockaddr_in *addr);
+
 /*
  * This routine is called by the ICMP module when it gets some
  * sort of error condition.  If err < 0 then the socket should
@@ -944,9 +952,18 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		dport = usin->sin_port;
 		if (dport == 0)
 			return -EINVAL;
+
+		err = gr_search_udp_sendmsg(sk, usin);
+		if (err)
+			return err;
 	} else {
 		if (sk->sk_state != TCP_ESTABLISHED)
 			return -EDESTADDRREQ;
+
+		err = gr_search_udp_sendmsg(sk, NULL);
+		if (err)
+			return err;
+
 		daddr = inet->inet_daddr;
 		dport = inet->inet_dport;
 		/* Open fast path for connected socket.
@@ -1272,6 +1289,10 @@ try_again:
 				  &peeked, &off, &err);
 	if (!skb)
 		goto out;
+
+	err = gr_search_udp_recvmsg(sk, skb);
+	if (err)
+		goto out_free;
 
 	ulen = skb->len - sizeof(struct udphdr);
 	copied = len;
@@ -1823,6 +1844,9 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		goto csum_error;
 
 	UDP_INC_STATS_BH(net, UDP_MIB_NOPORTS, proto == IPPROTO_UDPLITE);
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+	if (!grsec_enable_blackhole || (skb->dev->flags & IFF_LOOPBACK))
+#endif
 	icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
 
 	/*

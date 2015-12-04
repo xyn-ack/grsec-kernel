@@ -44,6 +44,7 @@
 #include <linux/ptrace.h>
 #include <linux/audit.h>
 #include <linux/stddef.h>
+#include <linux/grsecurity.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -214,6 +215,14 @@ SYSCALL_DEFINE1(vm86old, struct vm86_struct __user *, v86)
 
 	if (tsk->thread.saved_sp0)
 		return -EPERM;
+
+#ifdef CONFIG_GRKERNSEC_VM86
+	if (!capable(CAP_SYS_RAWIO)) {
+		gr_handle_vm86();
+		return -EPERM;
+	}
+#endif
+
 	tmp = copy_vm86_regs_from_user(&info.regs, &v86->regs,
 				       offsetof(struct kernel_vm86_struct, vm86plus) -
 				       sizeof(info.regs));
@@ -237,6 +246,13 @@ SYSCALL_DEFINE2(vm86, unsigned long, cmd, unsigned long, arg)
 	struct task_struct *tsk;
 	int tmp;
 	struct vm86plus_struct __user *v86;
+
+#ifdef CONFIG_GRKERNSEC_VM86
+	if (!capable(CAP_SYS_RAWIO)) {
+		gr_handle_vm86();
+		return -EPERM;
+	}
+#endif
 
 	tsk = current;
 	switch (cmd) {

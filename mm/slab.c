@@ -4244,7 +4244,7 @@ static const struct file_operations proc_slabstats_operations = {
 static int __init slab_proc_init(void)
 {
 #ifdef CONFIG_DEBUG_SLAB_LEAK
-	proc_create("slab_allocators", 0, NULL, &proc_slabstats_operations);
+	proc_create("slab_allocators", S_IRUSR, NULL, &proc_slabstats_operations);
 #endif
 	return 0;
 }
@@ -4261,6 +4261,17 @@ bool is_usercopy_object(const void *ptr)
 
 	if (!slab_is_available())
 		return false;
+
+	if (is_vmalloc_addr(ptr)
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+	    && !object_starts_on_stack(ptr)
+#endif
+	) {
+		struct vm_struct *vm = find_vm_area(ptr);
+		if (vm && (vm->flags & VM_USERCOPY))
+			return true;
+		return false;
+	}
 
 	if (!virt_addr_valid(ptr))
 		return false;

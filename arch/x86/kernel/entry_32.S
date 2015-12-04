@@ -283,7 +283,7 @@ ENTRY(pax_erase_kstack)
 	pushl %eax
 
 	mov TI_lowest_stack(%ebp), %edi
-	mov $0xB4DD00D5, %eax
+	mov $-0xBEEF, %eax
 	std
 
 1:	mov %edi, %ecx

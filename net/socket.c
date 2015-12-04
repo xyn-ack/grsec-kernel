@@ -89,6 +89,7 @@
 #include <linux/magic.h>
 #include <linux/slab.h>
 #include <linux/xattr.h>
+#include <linux/in.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -107,6 +108,7 @@
 #include <linux/atalk.h>
 #include <net/busy_poll.h>
 #include <linux/errqueue.h>
+#include <linux/grsock.h>
 
 #ifdef CONFIG_NET_RX_BUSY_POLL
 unsigned int sysctl_net_busy_read __read_mostly;
@@ -160,7 +162,7 @@ static const struct file_operations socket_file_ops = {
  */
 
 static DEFINE_SPINLOCK(net_family_lock);
-static const struct net_proto_family __rcu *net_families[NPROTO] __read_mostly;
+const struct net_proto_family __rcu *net_families[NPROTO] __read_mostly;
 
 /*
  *	Statistics counters of the socket lists
@@ -326,7 +328,7 @@ static struct dentry *sockfs_mount(struct file_system_type *fs_type,
 		&sockfs_dentry_operations, SOCKFS_MAGIC);
 }
 
-static struct vfsmount *sock_mnt __read_mostly;
+struct vfsmount *sock_mnt __read_mostly;
 
 static struct file_system_type sock_fs_type = {
 	.name =		"sockfs",
@@ -1108,6 +1110,8 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 		return -EAFNOSUPPORT;
 	if (type < 0 || type >= SOCK_MAX)
 		return -EINVAL;
+	if (protocol < 0)
+		return -EINVAL;
 
 	/* Compatibility.
 
@@ -1127,6 +1131,20 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	err = security_socket_create(family, type, protocol, kern);
 	if (err)
 		return err;
+
+	if(!kern && !gr_search_socket(family, type, protocol)) {
+		if (rcu_access_pointer(net_families[family]) == NULL)
+			return -EAFNOSUPPORT;
+		else
+			return -EACCES;
+	}
+
+	if (!kern && gr_handle_sock_all(family, type, protocol)) {
+		if (rcu_access_pointer(net_families[family]) == NULL)
+			return -EAFNOSUPPORT;
+		else
+			return -EACCES;
+	}
 
 	/*
 	 *	Allocate the socket and allow the family to set things up. if
@@ -1379,6 +1397,14 @@ SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen)
 	if (sock) {
 		err = move_addr_to_kernel(umyaddr, addrlen, &address);
 		if (err >= 0) {
+			if (gr_handle_sock_server((struct sockaddr *)&address)) {
+				err = -EACCES;
+				goto error;
+			}
+			err = gr_search_bind(sock, (struct sockaddr_in *)&address);
+			if (err)
+				goto error;
+
 			err = security_socket_bind(sock,
 						   (struct sockaddr *)&address,
 						   addrlen);
@@ -1387,6 +1413,7 @@ SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen)
 						      (struct sockaddr *)
 						      &address, addrlen);
 		}
+error:
 		fput_light(sock->file, fput_needed);
 	}
 	return err;
@@ -1410,10 +1437,20 @@ SYSCALL_DEFINE2(listen, int, fd, int, backlog)
 		if ((unsigned int)backlog > somaxconn)
 			backlog = somaxconn;
 
+		if (gr_handle_sock_server_other(sock->sk)) {
+			err = -EPERM;
+			goto error;
+		}
+
+		err = gr_search_listen(sock);
+		if (err)
+			goto error;
+
 		err = security_socket_listen(sock, backlog);
 		if (!err)
 			err = sock->ops->listen(sock, backlog);
 
+error:
 		fput_light(sock->file, fput_needed);
 	}
 	return err;
@@ -1456,6 +1493,18 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
 
 	newsock->type = sock->type;
 	newsock->ops = sock->ops;
+
+	if (gr_handle_sock_server_other(sock->sk)) {
+		err = -EPERM;
+		sock_release(newsock);
+		goto out_put;
+	}
+
+	err = gr_search_accept(sock);
+	if (err) {
+		sock_release(newsock);
+		goto out_put;
+	}
 
 	/*
 	 * We don't need try_module_get here, as the listening socket (sock)
@@ -1502,6 +1551,8 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
 	fd_install(newfd, newfile);
 	err = newfd;
 
+	gr_attach_curr_ip(newsock->sk);
+
 out_put:
 	fput_light(sock->file, fput_needed);
 out:
@@ -1534,6 +1585,7 @@ SYSCALL_DEFINE3(connect, int, fd, struct sockaddr __user *, uservaddr,
 		int, addrlen)
 {
 	struct socket *sock;
+	struct sockaddr *sck;
 	struct sockaddr_storage address;
 	int err, fput_needed;
 
@@ -1542,6 +1594,17 @@ SYSCALL_DEFINE3(connect, int, fd, struct sockaddr __user *, uservaddr,
 		goto out;
 	err = move_addr_to_kernel(uservaddr, addrlen, &address);
 	if (err < 0)
+		goto out_put;
+
+	sck = (struct sockaddr *)&address;
+
+	if (gr_handle_sock_client(sck)) {
+		err = -EACCES;
+		goto out_put;
+	}
+
+	err = gr_search_connect(sock, (struct sockaddr_in *)sck);
+	if (err)
 		goto out_put;
 
 	err =
@@ -1690,7 +1753,7 @@ SYSCALL_DEFINE6(recvfrom, int, fd, void __user *, ubuf, size_t, size,
 	struct socket *sock;
 	struct iovec iov;
 	struct msghdr msg;
-	struct sockaddr_storage address;
+	struct sockaddr_storage address = { };
 	int err, err2;
 	int fput_needed;
 
@@ -2082,7 +2145,7 @@ static int ___sys_recvmsg(struct socket *sock, struct user_msghdr __user *msg,
 	ssize_t err;
 
 	/* kernel mode address */
-	struct sockaddr_storage addr;
+	struct sockaddr_storage addr = { };
 
 	/* user mode address pointers */
 	struct sockaddr __user *uaddr;

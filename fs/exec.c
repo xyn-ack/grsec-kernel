@@ -66,7 +66,10 @@
 #include <linux/kdebug.h>
 #endif
 
+#include <trace/events/fs.h>
+
 #include <asm/uaccess.h>
+#include <asm/sections.h>
 #include <asm/mmu_context.h>
 #include <asm/tlb.h>
 
@@ -91,6 +94,9 @@ int suid_dumpable = 0;
 
 static LIST_HEAD(formats);
 static DEFINE_RWLOCK(binfmt_lock);
+
+extern int gr_process_kernel_exec_ban(void);
+extern int gr_process_suid_exec_ban(const struct linux_binprm *bprm);
 
 void __register_binfmt(struct linux_binfmt * fmt, int insert)
 {
@@ -223,6 +229,17 @@ static struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
 		if (size <= ARG_MAX)
 			return page;
 
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+		// only allow 512KB for argv+env on suid/sgid binaries
+		// to prevent easy ASLR exhaustion
+		if (((!uid_eq(bprm->cred->euid, current_euid())) ||
+		     (!gid_eq(bprm->cred->egid, current_egid()))) &&
+		    (size > (512 * 1024))) {
+			put_page(page);
+			return NULL;
+		}
+#endif
+
 		/*
 		 * Limit to 1/4-th the stack size for the argv+env strings.
 		 * This ensures that:
@@ -301,7 +318,7 @@ static int __bprm_mm_init(struct linux_binprm *bprm)
 
 #ifdef CONFIG_PAX_RANDUSTACK
 	if (randomize_va_space)
-		bprm->p ^= (pax_get_random_long() & ~15) & ~PAGE_MASK;
+		bprm->p ^= prandom_u32() & ~PAGE_MASK;
 #endif
 
 	return 0;
@@ -420,7 +437,7 @@ struct user_arg_ptr {
 	} ptr;
 };
 
-static const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
+const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
 {
 	const char __user *native;
 
@@ -843,8 +860,10 @@ static struct file *do_open_execat(int fd, struct filename *name, int flags)
 	if (err)
 		goto exit;
 
-	if (name->name[0] != '\0')
+	if (name->name[0] != '\0') {
 		fsnotify_open(file);
+		trace_open_exec(name->name);
+	}
 
 out:
 	return file;
@@ -922,6 +941,7 @@ static int exec_mmap(struct mm_struct *mm)
 	tsk->mm = mm;
 	tsk->active_mm = mm;
 	activate_mm(active_mm, mm);
+	populate_stack();
 	tsk->mm->vmacache_seqnum = 0;
 	vmacache_flush(tsk);
 	task_unlock(tsk);
@@ -1531,6 +1551,31 @@ static int exec_binprm(struct linux_binprm *bprm)
 	return ret;
 }
 
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+static DEFINE_PER_CPU(u64, exec_counter);
+static int __init init_exec_counters(void)
+{
+	unsigned int cpu;
+
+	for_each_possible_cpu(cpu) {
+		per_cpu(exec_counter, cpu) = (u64)cpu;
+	}
+
+	return 0;
+}
+early_initcall(init_exec_counters);
+static inline void increment_exec_counter(void)
+{
+	BUILD_BUG_ON(NR_CPUS > (1 << 16));
+	current->exec_id = this_cpu_add_return(exec_counter, 1 << 16);
+}
+#else
+static inline void increment_exec_counter(void) {}
+#endif
+
+extern void gr_handle_exec_args(struct linux_binprm *bprm,
+				struct user_arg_ptr argv);
+
 /*
  * sys_execve() executes a new program.
  */
@@ -1539,6 +1584,11 @@ static int do_execveat_common(int fd, struct filename *filename,
 			      struct user_arg_ptr envp,
 			      int flags)
 {
+#ifdef CONFIG_GRKERNSEC
+	struct file *old_exec_file;
+	struct acl_subject_label *old_acl;
+	struct rlimit old_rlim[RLIM_NLIMITS];
+#endif
 	char *pathbuf = NULL;
 	struct linux_binprm *bprm;
 	struct file *file;
@@ -1547,6 +1597,8 @@ static int do_execveat_common(int fd, struct filename *filename,
 
 	if (IS_ERR(filename))
 		return PTR_ERR(filename);
+
+	gr_learn_resource(current, RLIMIT_NPROC, atomic_read(&current_user()->processes), 1);
 
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
@@ -1585,6 +1637,11 @@ static int do_execveat_common(int fd, struct filename *filename,
 	if (IS_ERR(file))
 		goto out_unmark;
 
+	if (gr_ptrace_readexec(file, bprm->unsafe)) {
+		retval = -EPERM;
+		goto out_unmark;
+	}
+
 	sched_exec();
 
 	bprm->file = file;
@@ -1611,6 +1668,11 @@ static int do_execveat_common(int fd, struct filename *filename,
 	}
 	bprm->interp = bprm->filename;
 
+	if (!gr_acl_handle_execve(file->f_path.dentry, file->f_path.mnt)) {
+		retval = -EACCES;
+		goto out_unmark;
+	}
+
 	retval = bprm_mm_init(bprm);
 	if (retval)
 		goto out_unmark;
@@ -1627,24 +1689,70 @@ static int do_execveat_common(int fd, struct filename *filename,
 	if (retval < 0)
 		goto out;
 
+#ifdef CONFIG_GRKERNSEC
+	old_acl = current->acl;
+	memcpy(old_rlim, current->signal->rlim, sizeof(old_rlim));
+	old_exec_file = current->exec_file;
+	get_file(file);
+	current->exec_file = file;
+#endif
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+	/* limit suid stack to 8MB
+	 * we saved the old limits above and will restore them if this exec fails
+	 */
+	if (((!uid_eq(bprm->cred->euid, current_euid())) || (!gid_eq(bprm->cred->egid, current_egid()))) &&
+	    (old_rlim[RLIMIT_STACK].rlim_cur > (8 * 1024 * 1024)))
+		current->signal->rlim[RLIMIT_STACK].rlim_cur = 8 * 1024 * 1024;
+#endif
+
+	if (gr_process_kernel_exec_ban() || gr_process_suid_exec_ban(bprm)) {
+		retval = -EPERM;
+		goto out_fail;
+	}
+
+	if (!gr_tpe_allow(file)) {
+		retval = -EACCES;
+		goto out_fail;
+	}
+
+	if (gr_check_crash_exec(file)) {
+		retval = -EACCES;
+		goto out_fail;
+	}
+
+	retval = gr_set_proc_label(file->f_path.dentry, file->f_path.mnt,
+					bprm->unsafe);
+	if (retval < 0)
+		goto out_fail;
+
 	retval = copy_strings_kernel(1, &bprm->filename, bprm);
 	if (retval < 0)
-		goto out;
+		goto out_fail;
 
 	bprm->exec = bprm->p;
 	retval = copy_strings(bprm->envc, envp, bprm);
 	if (retval < 0)
-		goto out;
+		goto out_fail;
 
 	retval = copy_strings(bprm->argc, argv, bprm);
 	if (retval < 0)
-		goto out;
+		goto out_fail;
+
+	gr_log_chroot_exec(file->f_path.dentry, file->f_path.mnt);
+
+	gr_handle_exec_args(bprm, argv);
 
 	retval = exec_binprm(bprm);
 	if (retval < 0)
-		goto out;
+		goto out_fail;
+#ifdef CONFIG_GRKERNSEC
+	if (old_exec_file)
+		fput(old_exec_file);
+#endif
 
 	/* execve succeeded */
+
+	increment_exec_counter();
 	current->fs->in_exec = 0;
 	current->in_execve = 0;
 	acct_update_integrals(current);
@@ -1655,6 +1763,14 @@ static int do_execveat_common(int fd, struct filename *filename,
 	if (displaced)
 		put_files_struct(displaced);
 	return retval;
+
+out_fail:
+#ifdef CONFIG_GRKERNSEC
+	current->acl = old_acl;
+	memcpy(current->signal->rlim, old_rlim, sizeof(old_rlim));
+	fput(current->exec_file);
+	current->exec_file = old_exec_file;
+#endif
 
 out:
 	if (bprm->mm) {
@@ -1907,12 +2023,19 @@ void pax_report_fault(struct pt_regs *regs, void *pc, void *sp)
 			offset = vma_fault->vm_pgoff << PAGE_SHIFT;
 			if (vma_fault->vm_file)
 				path_fault = pax_get_path(&vma_fault->vm_file->f_path, buffer_fault, PAGE_SIZE);
+			else if ((unsigned long)pc >= mm->start_brk && (unsigned long)pc < mm->brk)
+				path_fault = "<heap>";
+			else if (vma_fault->vm_flags & (VM_GROWSDOWN | VM_GROWSUP))
+				path_fault = "<stack>";
 			else
 				path_fault = "<anonymous mapping>";
 		}
 		up_read(&mm->mmap_sem);
 	}
-	printk(KERN_ERR "PAX: execution attempt in: %s, %08lx-%08lx %08lx\n", path_fault, start, end, offset);
+	if (tsk->signal->curr_ip)
+		printk(KERN_ERR "PAX: From %pI4: execution attempt in: %s, %08lx-%08lx %08lx\n", &tsk->signal->curr_ip, path_fault, start, end, offset);
+	else
+		printk(KERN_ERR "PAX: execution attempt in: %s, %08lx-%08lx %08lx\n", path_fault, start, end, offset);
 	printk(KERN_ERR "PAX: terminating task: %s(%s):%d, uid/euid: %u/%u, PC: %p, SP: %p\n", path_exec, tsk->comm, task_pid_nr(tsk),
 			from_kuid_munged(&init_user_ns, task_uid(tsk)), from_kuid_munged(&init_user_ns, task_euid(tsk)), pc, sp);
 	free_page((unsigned long)buffer_exec);
@@ -1930,8 +2053,13 @@ void pax_report_fault(struct pt_regs *regs, void *pc, void *sp)
 #ifdef CONFIG_PAX_REFCOUNT
 void pax_report_refcount_overflow(struct pt_regs *regs)
 {
-	printk(KERN_EMERG "PAX: refcount overflow detected in: %s:%d, uid/euid: %u/%u\n", current->comm, task_pid_nr(current),
-			from_kuid_munged(&init_user_ns, current_uid()), from_kuid_munged(&init_user_ns, current_euid()));
+	if (current->signal->curr_ip)
+		printk(KERN_EMERG "PAX: From %pI4: refcount overflow detected in: %s:%d, uid/euid: %u/%u\n",
+				&current->signal->curr_ip, current->comm, task_pid_nr(current),
+				from_kuid_munged(&init_user_ns, current_uid()), from_kuid_munged(&init_user_ns, current_euid()));
+	else
+		printk(KERN_EMERG "PAX: refcount overflow detected in: %s:%d, uid/euid: %u/%u\n", current->comm, task_pid_nr(current),
+				from_kuid_munged(&init_user_ns, current_uid()), from_kuid_munged(&init_user_ns, current_euid()));
 	print_symbol(KERN_EMERG "PAX: refcount overflow occured at: %s\n", instruction_pointer(regs));
 	preempt_disable();
 	show_regs(regs);
@@ -1990,27 +2118,85 @@ static noinline int check_stack_object(const void *obj, unsigned long len)
 
 static __noreturn void pax_report_usercopy(const void *ptr, unsigned long len, bool to_user, const char *type)
 {
-	printk(KERN_EMERG "PAX: kernel memory %s attempt detected %s %p (%s) (%lu bytes)\n",
-		to_user ? "leak" : "overwrite", to_user ? "from" : "to", ptr, type ? : "unknown", len);
+	if (current->signal->curr_ip)
+		printk(KERN_EMERG "PAX: From %pI4: kernel memory %s attempt detected %s %p (%s) (%lu bytes)\n",
+			&current->signal->curr_ip, to_user ? "leak" : "overwrite", to_user ? "from" : "to", ptr, type ? : "unknown", len);
+	else
+		printk(KERN_EMERG "PAX: kernel memory %s attempt detected %s %p (%s) (%lu bytes)\n",
+			to_user ? "leak" : "overwrite", to_user ? "from" : "to", ptr, type ? : "unknown", len);
 	dump_stack();
+	gr_handle_kernel_exploit();
 	do_group_exit(SIGKILL);
 }
 #endif
 
-void __check_object_size(const void *ptr, unsigned long n, bool to_user)
-{
+#ifdef CONFIG_PAX_USERCOPY
 
+static inline bool check_kernel_text_object(unsigned long low, unsigned long high)
+{
+#if defined(CONFIG_X86_32) && defined(CONFIG_PAX_KERNEXEC)
+	unsigned long textlow = ktla_ktva((unsigned long)_stext);
+#ifdef CONFIG_MODULES
+	unsigned long texthigh = (unsigned long)MODULES_EXEC_VADDR;
+#else
+	unsigned long texthigh = ktla_ktva((unsigned long)_etext);
+#endif
+
+#else
+	unsigned long textlow = (unsigned long)_stext;
+	unsigned long texthigh = (unsigned long)_etext;
+
+#ifdef CONFIG_X86_64
+	/* check against linear mapping as well */
+	if (high > (unsigned long)__va(__pa(textlow)) &&
+	    low < (unsigned long)__va(__pa(texthigh)))
+		return true;
+#endif
+
+#endif
+
+	if (high <= textlow || low >= texthigh)
+		return false;
+	else
+		return true;
+}
+#endif
+
+void __check_object_size(const void *ptr, unsigned long n, bool to_user, bool const_size)
+{
 #ifdef CONFIG_PAX_USERCOPY
 	const char *type;
+#endif
 
+#if !defined(CONFIG_STACK_GROWSUP) && !defined(CONFIG_X86_64)
+	unsigned long stackstart = (unsigned long)task_stack_page(current);
+	unsigned long currentsp = (unsigned long)&stackstart;
+	if (unlikely((currentsp < stackstart + 512 ||
+		     currentsp >= stackstart + THREAD_SIZE) && !in_interrupt()))
+		BUG();
+#endif
+
+#ifndef CONFIG_PAX_USERCOPY_DEBUG
+	if (const_size)
+		return;
+#endif
+
+#ifdef CONFIG_PAX_USERCOPY
 	if (!n)
 		return;
 
 	type = check_heap_object(ptr, n);
 	if (!type) {
-		if (check_stack_object(ptr, n) != -1)
+		int ret = check_stack_object(ptr, n);
+		if (ret == 1 || ret == 2)
 			return;
-		type = "<process stack>";
+		if (ret == 0) {
+			if (check_kernel_text_object((unsigned long)ptr, (unsigned long)ptr + n))
+				type = "<kernel text>";
+			else
+				return;
+		} else
+			type = "<process stack>";
 	}
 
 	pax_report_usercopy(ptr, n, to_user, type);
@@ -2026,6 +2212,8 @@ void __used pax_track_stack(void)
 	if (sp < current_thread_info()->lowest_stack &&
 	    sp >= (unsigned long)task_stack_page(current) + 2 * sizeof(unsigned long))
 		current_thread_info()->lowest_stack = sp;
+	if (unlikely((sp & ~(THREAD_SIZE - 1)) < (THREAD_SIZE/16)))
+		BUG();
 }
 EXPORT_SYMBOL(pax_track_stack);
 #endif

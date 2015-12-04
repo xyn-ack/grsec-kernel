@@ -5605,6 +5605,7 @@ discard:
 	    tcp_paws_reject(&tp->rx_opt, 0))
 		goto discard_and_undo;
 
+#ifndef CONFIG_GRKERNSEC_NO_SIMULT_CONNECT
 	if (th->syn) {
 		/* We see SYN without ACK. It is attempt of
 		 * simultaneous connect with crossed SYNs.
@@ -5655,6 +5656,7 @@ discard:
 		goto discard;
 #endif
 	}
+#endif
 	/* "fifth, if neither of the SYN or RST bits is set then
 	 * drop the segment and return."
 	 */
@@ -5701,7 +5703,7 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 			goto discard;
 
 		if (th->syn) {
-			if (th->fin)
+			if (th->fin || th->urg || th->psh)
 				goto discard;
 			if (icsk->icsk_af_ops->conn_request(sk, skb) < 0)
 				return 1;

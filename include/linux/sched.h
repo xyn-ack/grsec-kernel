@@ -432,8 +432,19 @@ struct nsproxy;
 struct user_namespace;
 
 #ifdef CONFIG_MMU
-extern bool check_heap_stack_gap(const struct vm_area_struct *vma, unsigned long addr, unsigned long len);
-extern unsigned long skip_heap_stack_gap(const struct vm_area_struct *vma, unsigned long len);
+
+#ifdef CONFIG_GRKERNSEC_RAND_THREADSTACK
+extern unsigned long gr_rand_threadstack_offset(const struct mm_struct *mm, const struct file *filp, unsigned long flags);
+#else
+static inline unsigned long gr_rand_threadstack_offset(const struct mm_struct *mm, const struct file *filp, unsigned long flags)
+{
+	return 0;
+}
+#endif
+
+extern bool check_heap_stack_gap(const struct vm_area_struct *vma, unsigned long addr, unsigned long len, unsigned long offset);
+extern unsigned long skip_heap_stack_gap(const struct vm_area_struct *vma, unsigned long len, unsigned long offset);
+
 extern void arch_pick_mmap_layout(struct mm_struct *mm);
 extern unsigned long
 arch_get_unmapped_area(struct file *, unsigned long, unsigned long,
@@ -732,6 +743,17 @@ struct signal_struct {
 #ifdef CONFIG_TASKSTATS
 	struct taskstats *stats;
 #endif
+
+#ifdef CONFIG_GRKERNSEC
+	u32 curr_ip;
+	u32 saved_ip;
+	u32 gr_saddr;
+	u32 gr_daddr;
+	u16 gr_sport;
+	u16 gr_dport;
+	u8 used_accept:1;
+#endif
+
 #ifdef CONFIG_AUDIT
 	unsigned audit_tty;
 	unsigned audit_tty_log_passwd;
@@ -758,7 +780,7 @@ struct signal_struct {
 	struct mutex cred_guard_mutex;	/* guard against foreign influences on
 					 * credential calculations
 					 * (notably. ptrace) */
-};
+} __randomize_layout;
 
 /*
  * Bits in flags field of signal_struct.
@@ -811,6 +833,14 @@ struct user_struct {
 	struct key *session_keyring;	/* UID's default session keyring */
 #endif
 
+#ifdef CONFIG_GRKERNSEC_KERN_LOCKOUT
+	unsigned char kernel_banned;
+#endif
+#ifdef CONFIG_GRKERNSEC_BRUTE
+	unsigned char suid_banned;
+	unsigned long suid_ban_expires;
+#endif
+
 	/* Hash table maintenance information */
 	struct hlist_node uidhash_node;
 	kuid_t uid;
@@ -818,7 +848,7 @@ struct user_struct {
 #ifdef CONFIG_PERF_EVENTS
 	atomic_long_t locked_vm;
 #endif
-};
+} __randomize_layout;
 
 extern int uids_sysfs_init(void);
 
@@ -1295,6 +1325,9 @@ enum perf_event_task_context {
 struct task_struct {
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
 	void *stack;
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+	void *lowmem_stack;
+#endif
 	atomic_t usage;
 	unsigned int flags;	/* per process flags, defined below */
 	unsigned int ptrace;
@@ -1454,11 +1487,6 @@ struct task_struct {
 	struct task_cputime cputime_expires;
 	struct list_head cpu_timers[3];
 
-/* process credentials */
-	const struct cred __rcu *real_cred; /* objective and real subjective task
-					 * credentials (COW) */
-	const struct cred __rcu *cred;	/* effective (overridable) subjective task
-					 * credentials (COW) */
 	char comm[TASK_COMM_LEN]; /* executable name excluding path
 				     - access with [gs]et_task_comm (which lock
 				       it with task_lock())
@@ -1554,6 +1582,10 @@ struct task_struct {
 	gfp_t lockdep_reclaim_gfp;
 #endif
 
+/* process credentials */
+	const struct cred __rcu *real_cred; /* objective and real subjective task
+					 * credentials (COW) */
+
 /* journalling filesystem info */
 	void *journal_info;
 
@@ -1592,6 +1624,10 @@ struct task_struct {
 	/* cg_list protected by css_set_lock and tsk->alloc_lock */
 	struct list_head cg_list;
 #endif
+
+	const struct cred __rcu *cred;	/* effective (overridable) subjective task
+					 * credentials (COW) */
+
 #ifdef CONFIG_FUTEX
 	struct robust_list_head __user *robust_list;
 #ifdef CONFIG_COMPAT
@@ -1731,7 +1767,31 @@ struct task_struct {
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 	unsigned long	task_state_change;
 #endif
-};
+
+#ifdef CONFIG_GRKERNSEC
+	/* grsecurity */
+#ifdef CONFIG_GRKERNSEC_PROC_MEMMAP
+	u64 exec_id;
+#endif
+#ifdef CONFIG_GRKERNSEC_SETXID
+	const struct cred *delayed_cred;
+#endif
+	struct dentry *gr_chroot_dentry;
+	struct acl_subject_label *acl;
+	struct acl_subject_label *tmpacl;
+	struct acl_role_label *role;
+	struct file *exec_file;
+	unsigned long brute_expires;
+	u16 acl_role_id;
+	u8 inherited;
+	/* is this the task that authenticated to the special role */
+	u8 acl_sp_role;
+	u8 is_writable;
+	u8 brute;
+	u8 gr_is_chrooted;
+#endif
+
+} __randomize_layout;
 
 #define MF_PAX_PAGEEXEC		0x01000000	/* Paging based non-executable pages */
 #define MF_PAX_EMUTRAMP		0x02000000	/* Emulate trampolines */
@@ -1861,7 +1921,7 @@ struct pid_namespace;
 pid_t __task_pid_nr_ns(struct task_struct *task, enum pid_type type,
 			struct pid_namespace *ns);
 
-static inline pid_t task_pid_nr(struct task_struct *tsk)
+static inline pid_t task_pid_nr(const struct task_struct *tsk)
 {
 	return tsk->pid;
 }
@@ -2229,6 +2289,25 @@ extern u64 sched_clock_cpu(int cpu);
 
 extern void sched_clock_init(void);
 
+#ifdef CONFIG_GRKERNSEC_KSTACKOVERFLOW
+static inline void populate_stack(void)
+{
+	struct task_struct *curtask = current;
+	int c;
+	int *ptr = curtask->stack;
+	int *end = curtask->stack + THREAD_SIZE;
+
+	while (ptr < end) {
+		c = *(volatile int *)ptr;
+		ptr += PAGE_SIZE/sizeof(int);
+	}
+}
+#else
+static inline void populate_stack(void)
+{
+}
+#endif
+
 #ifndef CONFIG_HAVE_UNSTABLE_SCHED_CLOCK
 static inline void sched_clock_tick(void)
 {
@@ -2392,6 +2471,7 @@ extern struct pid_namespace init_pid_ns;
  */
 
 extern struct task_struct *find_task_by_vpid(pid_t nr);
+extern struct task_struct *find_task_by_vpid_unrestricted(pid_t nr);
 extern struct task_struct *find_task_by_pid_ns(pid_t nr,
 		struct pid_namespace *ns);
 
@@ -2777,7 +2857,7 @@ static inline unsigned long *end_of_stack(struct task_struct *p)
 #define task_stack_end_corrupted(task) \
 		(*(end_of_stack(task)) != STACK_END_MAGIC)
 
-static inline int object_starts_on_stack(void *obj)
+static inline int object_starts_on_stack(const void *obj)
 {
 	const void *stack = task_stack_page(current);
 

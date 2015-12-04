@@ -13,7 +13,11 @@
 #include <linux/if_vlan.h>
 #include <asm/cacheflush.h>
 
+#ifdef CONFIG_GRKERNSEC_BPF_HARDEN
+int bpf_jit_enable __read_only;
+#else
 int bpf_jit_enable __read_mostly;
+#endif
 
 /*
  * assembly code in arch/x86/net/bpf_jit.S

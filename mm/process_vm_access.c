@@ -13,6 +13,7 @@
 #include <linux/uio.h>
 #include <linux/sched.h>
 #include <linux/highmem.h>
+#include <linux/security.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
@@ -192,6 +193,11 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 	if (!task) {
 		rc = -ESRCH;
 		goto free_proc_pages;
+	}
+
+	if (gr_handle_ptrace(task, vm_write ? PTRACE_POKETEXT : PTRACE_ATTACH)) {
+		rc = -EPERM;
+		goto put_task_struct;
 	}
 
 	mm = mm_access(task, PTRACE_MODE_ATTACH);

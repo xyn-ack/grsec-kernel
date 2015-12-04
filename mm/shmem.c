@@ -33,7 +33,7 @@
 #include <linux/swap.h>
 #include <linux/uio.h>
 
-static struct vfsmount *shm_mnt;
+struct vfsmount *shm_mnt;
 
 #ifdef CONFIG_SHMEM
 /*

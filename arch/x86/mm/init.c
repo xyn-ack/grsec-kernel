@@ -4,6 +4,7 @@
 #include <linux/swap.h>
 #include <linux/memblock.h>
 #include <linux/bootmem.h>	/* for max_low_pfn */
+#include <linux/tboot.h>
 
 #include <asm/cacheflush.h>
 #include <asm/e820.h>
@@ -18,6 +19,7 @@
 #include <asm/dma.h>		/* for MAX_DMA_PFN */
 #include <asm/microcode.h>
 #include <asm/desc.h>
+#include <asm/bios_ebda.h>
 
 /*
  * We need to define the tracepoints somewhere, and tlb.c
@@ -643,16 +645,40 @@ void __init init_mem_mapping(void)
  * Access has to be given to non-kernel-ram areas as well, these contain the PCI
  * mmio resources as well as potential bios/acpi data regions.
  */
+
+#ifdef CONFIG_GRKERNSEC_KMEM
+static unsigned int ebda_start __read_only;
+static unsigned int ebda_end __read_only;
+#endif
+
 int devmem_is_allowed(unsigned long pagenr)
 {
+#ifdef CONFIG_GRKERNSEC_KMEM
+	/* allow BDA */
+	if (!pagenr)
+		return 1;
+	/* allow EBDA */
+	if (pagenr >= ebda_start && pagenr < ebda_end)
+		return 1;
+	/* if tboot is in use, allow access to its hardcoded serial log range */
+	if (tboot_enabled() && ((0x60000 >> PAGE_SHIFT) <= pagenr) && (pagenr < (0x68000 >> PAGE_SHIFT)))
+		return 1;
+#else
 	if (!pagenr)
 		return 1;
 #ifdef CONFIG_VM86
 	if (pagenr < (ISA_START_ADDRESS >> PAGE_SHIFT))
 		return 1;
 #endif
+#endif
+
 	if ((ISA_START_ADDRESS >> PAGE_SHIFT) <= pagenr && pagenr < (ISA_END_ADDRESS >> PAGE_SHIFT))
 		return 1;
+#ifdef CONFIG_GRKERNSEC_KMEM
+	/* throw out everything else below 1MB */
+	if (pagenr <= 256)
+		return 0;
+#endif
 	if (iomem_is_exclusive(pagenr << PAGE_SHIFT))
 		return 0;
 	if (!page_is_ram(pagenr))
@@ -698,16 +724,49 @@ void free_init_pages(char *what, unsigned long begin, unsigned long end)
 #endif
 }
 
+#ifdef CONFIG_GRKERNSEC_KMEM
+static inline void gr_init_ebda(void)
+{
+	unsigned int ebda_addr;
+	unsigned int ebda_size = 0;
+
+	ebda_addr = get_bios_ebda();
+	if (ebda_addr) {
+		ebda_size = *(unsigned char *)phys_to_virt(ebda_addr);
+		ebda_size <<= 10;
+	}
+	if (ebda_addr && ebda_size) {
+		ebda_start = ebda_addr >> PAGE_SHIFT;
+		ebda_end = min((unsigned int)PAGE_ALIGN(ebda_addr + ebda_size), (unsigned int)0xa0000) >> PAGE_SHIFT;
+	} else {
+		ebda_start = 0x9f000 >> PAGE_SHIFT;
+		ebda_end = 0xa0000 >> PAGE_SHIFT;
+	}
+}
+#else
+static inline void gr_init_ebda(void) { }
+#endif
+
 void free_initmem(void)
 {
-
 #ifdef CONFIG_PAX_KERNEXEC
 #ifdef CONFIG_X86_32
 	/* PaX: limit KERNEL_CS to actual size */
 	unsigned long addr, limit;
 	struct desc_struct d;
 	int cpu;
+#else
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	unsigned long addr, end;
+#endif
+#endif
 
+	gr_init_ebda();
+
+#ifdef CONFIG_PAX_KERNEXEC
+#ifdef CONFIG_X86_32
 	limit = paravirt_enabled() ? ktva_ktla(0xffffffff) : (unsigned long)&_etext;
 	limit = (limit - 1UL) >> PAGE_SHIFT;
 
@@ -747,11 +806,6 @@ void free_initmem(void)
 #endif
 
 #else
-	pgd_t *pgd;
-	pud_t *pud;
-	pmd_t *pmd;
-	unsigned long addr, end;
-
 	/* PaX: make kernel code/rodata read-only, rest non-executable */
 	set_memory_ro((unsigned long)_text, ((unsigned long)(_sdata - _text) >> PAGE_SHIFT));
 	set_memory_nx((unsigned long)_sdata, (__START_KERNEL_map + KERNEL_IMAGE_SIZE - (unsigned long)_sdata) >> PAGE_SHIFT);

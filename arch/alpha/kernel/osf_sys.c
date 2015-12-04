@@ -1295,10 +1295,11 @@ SYSCALL_DEFINE1(old_adjtimex, struct timex32 __user *, txc_p)
    generic version except that we know how to honor ADDR_LIMIT_32BIT.  */
 
 static unsigned long
-arch_get_unmapped_area_1(unsigned long addr, unsigned long len,
-		         unsigned long limit)
+arch_get_unmapped_area_1(struct file *filp, unsigned long addr, unsigned long len,
+		         unsigned long limit, unsigned long flags)
 {
 	struct vm_unmapped_area_info info;
+	unsigned long offset = gr_rand_threadstack_offset(current->mm, filp, flags);
 
 	info.flags = 0;
 	info.length = len;
@@ -1306,6 +1307,7 @@ arch_get_unmapped_area_1(unsigned long addr, unsigned long len,
 	info.high_limit = limit;
 	info.align_mask = 0;
 	info.align_offset = 0;
+	info.threadstack_offset = offset;
 	return vm_unmapped_area(&info);
 }
 
@@ -1343,19 +1345,19 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 #endif
 
 	if (addr) {
-		addr = arch_get_unmapped_area_1 (PAGE_ALIGN(addr), len, limit);
+		addr = arch_get_unmapped_area_1 (filp, PAGE_ALIGN(addr), len, limit, flags);
 		if (addr != (unsigned long) -ENOMEM)
 			return addr;
 	}
 
 	/* Next, try allocating at TASK_UNMAPPED_BASE.  */
-	addr = arch_get_unmapped_area_1 (PAGE_ALIGN(current->mm->mmap_base), len, limit);
+	addr = arch_get_unmapped_area_1 (filp, PAGE_ALIGN(current->mm->mmap_base), len, limit, flags);
 
 	if (addr != (unsigned long) -ENOMEM)
 		return addr;
 
 	/* Finally, try allocating in low memory.  */
-	addr = arch_get_unmapped_area_1 (PAGE_SIZE, len, limit);
+	addr = arch_get_unmapped_area_1 (filp, PAGE_SIZE, len, limit, flags);
 
 	return addr;
 }
